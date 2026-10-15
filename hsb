@@ -1,0 +1,328 @@
+--[[
+	TacticalLocator_Mobile_v2.lua
+	Khắc phục:
+	1. Tương thích 100% trình biên dịch Luau tiêu chuẩn (bỏ cú pháp type/strict gây lỗi ngầm).
+	2. Đặt giao diện trong PlayerGui (ResetOnSpawn = false) để không bị mất khi nhân vật chết và hồi sinh.
+	3. Kết hợp BoxHandleAdornment + Khung 2D BillboardGui (AlwaysOnTop) + Highlight để hiển thị xuyên tường trên mọi mức đồ họa Mobile.
+	4. Tự động nhận diện cả Player thật và Bot/NPC có Humanoid trong Workspace (phù hợp chế độ Free-For-All).
+	5. Tích hợp nút Bật/Tắt ngay trên màn hình cảm ứng điện thoại.
+]]
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Dọn dẹp bản chạy cũ nếu thực thi lại script
+local OLD_GUI_NAME = "TacticalLocatorOverlay"
+local existingGui = PlayerGui:FindFirstChild(OLD_GUI_NAME)
+if existingGui then
+	existingGui:Destroy()
+end
+
+local CONFIG = {
+	Enabled = true,
+	TeamCheck = false,          -- Tắt mặc định để hiển thị toàn bộ mục tiêu trong chế độ Miễn phí cho tất cả (FFA)
+	ScanWorkspaceNPCs = true,   -- Quét cả Bot/NPC trong Workspace
+	MaxDistance = 2000,         -- Khoảng cách hiển thị tối đa (studs)
+	RefreshRate = 0.08,         -- Chu kỳ cập nhật khoảng cách & máu (giây)
+	ScanInterval = 1.5,         -- Chu kỳ quét mục tiêu mới trong Workspace (giây)
+	
+	EnemyColor = Color3.fromRGB(255, 60, 60),
+	TeamColor = Color3.fromRGB(50, 210, 255),
+	BotColor = Color3.fromRGB(255, 190, 50),
+}
+
+-- Khởi tạo ScreenGui chứa toàn bộ lớp định vị (không bị xóa khi hồi sinh)
+local mainGui = Instance.new("ScreenGui")
+mainGui.Name = OLD_GUI_NAME
+mainGui.ResetOnSpawn = false
+mainGui.IgnoreGuiInset = true
+mainGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+mainGui.Parent = PlayerGui
+
+local containerFolder = Instance.new("Folder")
+containerFolder.Name = "Trackers"
+containerFolder.Parent = mainGui
+
+-- Nút điều khiển trên màn hình cảm ứng (Mobile UI)
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "ToggleButton"
+toggleButton.Size = UDim2.fromOffset(115, 34)
+toggleButton.Position = UDim2.new(0, 14, 0.22, 0)
+toggleButton.BackgroundColor3 = Color3.fromRGB(25, 160, 85)
+toggleButton.TextColor3 = Color3.new(1, 1, 1)
+toggleButton.Font = Enum.Font.GothamBold
+toggleButton.TextSize = 13
+toggleButton.Text = "ESP: BẬT"
+toggleButton.BorderSizePixel = 0
+toggleButton.Active = true
+toggleButton.Draggable = true
+toggleButton.Parent = mainGui
+
+local btnCorner = Instance.new("UICorner")
+btnCorner.CornerRadius = UDim.new(0, 6)
+btnCorner.Parent = toggleButton
+
+toggleButton.MouseButton1Click:Connect(function()
+	CONFIG.Enabled = not CONFIG.Enabled
+	if CONFIG.Enabled then
+		toggleButton.Text = "ESP: BẬT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(25, 160, 85)
+	else
+		toggleButton.Text = "ESP: TẮT"
+		toggleButton.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
+	end
+end)
+
+-- Bảng lưu trữ các mục tiêu đang theo dõi: [Model] = TrackerData
+local trackedModels = {}
+local updateTimer = 0
+local scanTimer = 0
+
+local function cleanupModelTracker(characterModel)
+	local data = trackedModels[characterModel]
+	if not data then
+		return
+	end
+
+	if data.BoxAdornment then
+		data.BoxAdornment:Destroy()
+	end
+	if data.Billboard then
+		data.Billboard:Destroy()
+	end
+	if data.Highlight then
+		data.Highlight:Destroy()
+	end
+
+	trackedModels[characterModel] = nil
+end
+
+local function getTargetRootPart(characterModel)
+	return characterModel:FindFirstChild("HumanoidRootPart")
+		or characterModel:FindFirstChild("Torso")
+		or characterModel:FindFirstChild("UpperTorso")
+		or characterModel.PrimaryPart
+end
+
+local function getTargetColor(characterModel, ownerPlayer)
+	if not ownerPlayer then
+		return CONFIG.BotColor
+	end
+	if LocalPlayer.Team and ownerPlayer.Team and not LocalPlayer.Neutral and not ownerPlayer.Neutral then
+		if LocalPlayer.Team == ownerPlayer.Team then
+			return CONFIG.TeamColor
+		end
+	end
+	return CONFIG.EnemyColor
+end
+
+local function isTeammate(ownerPlayer)
+	if not ownerPlayer then
+		return false
+	end
+	if LocalPlayer.Team and ownerPlayer.Team and not LocalPlayer.Neutral and not ownerPlayer.Neutral then
+		return LocalPlayer.Team == ownerPlayer.Team
+	end
+	return false
+end
+
+local function createTrackerForModel(characterModel, ownerPlayer)
+	if trackedModels[characterModel] then
+		return
+	end
+	if characterModel == LocalPlayer.Character then
+		return
+	end
+
+	local humanoid = characterModel:FindFirstChildOfClass("Humanoid")
+	local rootPart = getTargetRootPart(characterModel)
+	if not humanoid or not rootPart or humanoid.Health <= 0 then
+		return
+	end
+
+	local color = getTargetColor(characterModel, ownerPlayer)
+
+	-- 1. Hộp 3D xuyên tường (Hoạt động trên mọi cấu hình Mobile, không giới hạn 31 đối tượng)
+	local boxAdorn = Instance.new("BoxHandleAdornment")
+	boxAdorn.Name = "TacticalBox3D"
+	boxAdorn.Adornee = rootPart
+	boxAdorn.AlwaysOnTop = true
+	boxAdorn.ZIndex = 5
+	boxAdorn.Size = Vector3.new(4, 5.5, 2)
+	boxAdorn.Color3 = color
+	boxAdorn.Transparency = 0.55
+	boxAdorn.Parent = containerFolder
+
+	-- 2. BillboardGui hiển thị khung 2D, Tên, Khoảng cách và Thanh máu
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "TacticalBillboard"
+	billboard.Adornee = rootPart
+	billboard.AlwaysOnTop = true
+	billboard.Size = UDim2.fromOffset(150, 50)
+	billboard.StudsOffset = Vector3.new(0, 3.8, 0)
+	billboard.Parent = containerFolder
+
+	local infoLabel = Instance.new("TextLabel")
+	infoLabel.Name = "InfoLabel"
+	infoLabel.Size = UDim2.new(1, 0, 0, 22)
+	infoLabel.BackgroundTransparency = 1
+	infoLabel.Font = Enum.Font.GothamBold
+	infoLabel.TextSize = 12
+	infoLabel.TextStrokeTransparency = 0.15
+	infoLabel.TextColor3 = color
+	infoLabel.Text = ownerPlayer and ownerPlayer.DisplayName or characterModel.Name
+	infoLabel.Parent = billboard
+
+	local healthBg = Instance.new("Frame")
+	healthBg.Name = "HealthBg"
+	healthBg.Size = UDim2.new(0.76, 0, 0, 6)
+	healthBg.Position = UDim2.new(0.12, 0, 0, 24)
+	healthBg.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+	healthBg.BorderSizePixel = 1
+	healthBg.BorderColor3 = Color3.fromRGB(0, 0, 0)
+	healthBg.Parent = billboard
+
+	local healthFill = Instance.new("Frame")
+	healthFill.Name = "HealthFill"
+	healthFill.Size = UDim2.fromScale(1, 1)
+	healthFill.BackgroundColor3 = Color3.fromRGB(50, 230, 80)
+	healthFill.BorderSizePixel = 0
+	healthFill.Parent = healthBg
+
+	-- Chấm tâm đánh dấu vị trí mục tiêu
+	local markerDot = Instance.new("Frame")
+	markerDot.Name = "CenterDot"
+	markerDot.Size = UDim2.fromOffset(8, 8)
+	markerDot.Position = UDim2.new(0.5, -4, 0, 36)
+	markerDot.BackgroundColor3 = color
+	markerDot.BorderSizePixel = 1
+	markerDot.BorderColor3 = Color3.new(1, 1, 1)
+	markerDot.Parent = billboard
+
+	local dotCorner = Instance.new("UICorner")
+	dotCorner.CornerRadius = UDim.new(1, 0)
+	dotCorner.Parent = markerDot
+
+	-- 3. Highlight viền nhân vật (bổ trợ khi thiết bị hỗ trợ)
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "TacticalHighlight"
+	highlight.Adornee = characterModel
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillColor = color
+	highlight.OutlineColor = Color3.new(1, 1, 1)
+	highlight.FillTransparency = 0.7
+	highlight.OutlineTransparency = 0.1
+	highlight.Parent = containerFolder
+
+	trackedModels[characterModel] = {
+		Model = characterModel,
+		OwnerPlayer = ownerPlayer,
+		Humanoid = humanoid,
+		RootPart = rootPart,
+		BoxAdornment = boxAdorn,
+		Billboard = billboard,
+		InfoLabel = infoLabel,
+		HealthFill = healthFill,
+		MarkerDot = markerDot,
+		Highlight = highlight,
+	}
+end
+
+-- Quét toàn bộ người chơi và các mô hình NPC/Bot trong Workspace
+local function scanTargets()
+	local localChar = LocalPlayer.Character
+
+	-- 1. Quét từ danh sách Players
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and player.Character then
+			createTrackerForModel(player.Character, player)
+		end
+	end
+
+	-- 2. Quét các mô hình nhân vật/Bot trong Workspace (dành cho game bắn súng dùng Bot hoặc thư mục nhân vật riêng)
+	if CONFIG.ScanWorkspaceNPCs then
+		for _, descendant in ipairs(Workspace:GetDescendants()) do
+			if descendant:IsA("Humanoid") then
+				local model = descendant.Parent
+				if model and model:IsA("Model") and model ~= localChar and not trackedModels[model] then
+					local owner = Players:GetPlayerFromCharacter(model)
+					if owner ~= LocalPlayer then
+						createTrackerForModel(model, owner)
+					end
+				end
+			end
+		end
+	end
+end
+
+-- Vòng lặp cập nhật vị trí, máu và trạng thái hiển thị
+RunService.Heartbeat:Connect(function(deltaTime)
+	updateTimer = updateTimer + deltaTime
+	scanTimer = scanTimer + deltaTime
+
+	if scanTimer >= CONFIG.ScanInterval then
+		scanTimer = 0
+		scanTargets()
+	end
+
+	if updateTimer < CONFIG.RefreshRate then
+		return
+	end
+	updateTimer = 0
+
+	local camera = Workspace.CurrentCamera
+	local localChar = LocalPlayer.Character
+	local localRoot = localChar and getTargetRootPart(localChar)
+	local originPos = (localRoot and localRoot.Position) or (camera and camera.CFrame.Position) or Vector3.zero
+
+	for characterModel, data in pairs(trackedModels) do
+		-- Kiểm tra mục tiêu còn tồn tại và còn sống hay không
+		if not characterModel.Parent
+			or characterModel == localChar
+			or not data.RootPart.Parent
+			or not data.Humanoid.Parent
+			or data.Humanoid.Health <= 0
+		then
+			cleanupModelTracker(characterModel)
+		else
+			local shouldShow = CONFIG.Enabled
+			if shouldShow and CONFIG.TeamCheck and isTeammate(data.OwnerPlayer) then
+				shouldShow = false
+			end
+
+			local distance = (originPos - data.RootPart.Position).Magnitude
+			if distance > CONFIG.MaxDistance then
+				shouldShow = false
+			end
+
+			data.BoxAdornment.Visible = shouldShow
+			data.Billboard.Enabled = shouldShow
+			data.Highlight.Enabled = shouldShow
+
+			if shouldShow then
+				local color = getTargetColor(characterModel, data.OwnerPlayer)
+				local maxHp = math.max(data.Humanoid.MaxHealth, 1)
+				local curHp = math.clamp(data.Humanoid.Health, 0, maxHp)
+				local hpRatio = curHp / maxHp
+
+				local displayName = data.OwnerPlayer and data.OwnerPlayer.DisplayName or characterModel.Name
+				data.InfoLabel.TextColor3 = color
+				data.InfoLabel.Text = string.format("%s [%dm | %d%%]", displayName, math.floor(distance), math.floor(hpRatio * 100))
+
+				data.HealthFill.Size = UDim2.fromScale(hpRatio, 1)
+				data.HealthFill.BackgroundColor3 = Color3.fromHSV(hpRatio * 0.33, 0.85, 0.95)
+
+				data.BoxAdornment.Color3 = color
+				data.MarkerDot.BackgroundColor3 = color
+				data.Highlight.FillColor = color
+			end
+		end
+	end
+end)
+
+-- Chạy quét lần đầu ngay khi khởi tạo
+scanTargets()
