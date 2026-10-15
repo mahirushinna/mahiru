@@ -1,13 +1,13 @@
 --[[
-	TacticalLocator_Mobile_v4.lua
+	TacticalLocator_Mobile_v5.lua
 	Cập nhật:
-	1. Lọc tuyệt đối chuẩn xác: Loại bỏ hoàn toàn đồng đội, chỉ vẽ chính xác kẻ địch.
-	2. Cơ chế quét an toàn chống nhầm lẫn Player bản thân và đồng đội.
-	3. Bộ đếm thời gian thực cập nhật chính xác số lượng kẻ địch đang hiển thị trên màn hình.
+	1. Bộ lọc thông minh quét trực tiếp các thành phần giao diện (TextLabel, Highlight) có màu xanh lá trên đầu nhân vật.
+	2. Loại bỏ hoàn toàn đồng đội khỏi danh sách vẽ ESP, chỉ giữ lại kẻ địch.
+	3. Cập nhật chính xác số lượng kẻ địch thực tế lên bộ đếm trên màn hình.
 ]]
 
 local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
+local Workspace = ServiceProvider and Workspace or game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
@@ -23,7 +23,7 @@ local CONFIG = {
 	Enabled = true,
 	MaxDistance = 2500,
 	RefreshRate = 0.05,
-	ScanInterval = 0.8,
+	ScanInterval = 0.6,
 	EnemyColor = Color3.fromRGB(255, 45, 45),
 }
 
@@ -39,7 +39,7 @@ containerFolder.Name = "Trackers"
 containerFolder.Parent = mainGui
 
 -- ==========================================
--- 1. BỘ ĐẾM SỐ KẺ ĐỊCH (DƯỚI CHỮ "XÁC NHẬN VỤ GIẾT ĐỒNG ĐỘI")
+-- 1. BỘ ĐẾM SỐ KẺ ĐỊCH (DƯỚI CHỮ TIÊU ĐỀ TRẬN ĐẤU)
 -- ==========================================
 local counterFrame = Instance.new("Frame")
 counterFrame.Name = "EnemyCounterFrame"
@@ -107,7 +107,7 @@ toggleButton.MouseButton1Click:Connect(function()
 end)
 
 -- ==========================================
--- 3. HỆ THỐNG LỌC ĐỘI CHUẨN XÁC
+-- 3. HỆ THỐNG LỌC ĐỒNG ĐỘI QUA DẤU HIỆU XANH LÁ
 -- ==========================================
 local trackedModels = {}
 local updateTimer = 0
@@ -129,30 +129,28 @@ local function getTargetRootPart(characterModel)
 		or characterModel.PrimaryPart
 end
 
--- Kiểm tra xem có phải đồng đội hoặc chính mình không
-local function shouldIgnorePlayer(targetPlayer, characterModel)
-	if not targetPlayer or targetPlayer == LocalPlayer then
-		return true
-	end
+-- Kiểm tra xem nhân vật có phải là đồng đội dựa trên giao diện màu xanh lá hay không
+local function isAllyByGreenIndicator(characterModel)
 	if characterModel == LocalPlayer.Character then
 		return true
 	end
-	-- Chặn các mô hình nằm trong Camera (viewmodel súng)
 	if Workspace.CurrentCamera and characterModel:IsDescendantOf(Workspace.CurrentCamera) then
 		return true
 	end
 
-	-- Kiểm tra Team chuẩn Roblox
-	if LocalPlayer.Team and targetPlayer.Team and not LocalPlayer.Neutral and not targetPlayer.Neutral then
-		if LocalPlayer.Team == targetPlayer.Team then
-			return true
-		end
-	end
-
-	-- Kiểm tra bổ sung qua màu áo/TeamColor nếu game phân chia đội bằng màu sắc
-	if not LocalPlayer.Neutral and not targetPlayer.Neutral then
-		if LocalPlayer.TeamColor == targetPlayer.TeamColor then
-			return true
+	-- Quét các thành phần trong mô hình nhân vật để tìm chữ hoặc màu chỉ thị đồng đội (xanh lá)
+	for _, desc in ipairs(characterModel:GetDescendants()) do
+		if desc:IsA("TextLabel") then
+			local c = desc.TextColor3
+			-- Nếu có chữ màu xanh lá chủ đạo (Green lớn hơn Red và Blue)
+			if c.G > c.R + 0.08 and c.G > c.B + 0.08 then
+				return true
+			end
+		elseif desc:IsA("Highlight") then
+			local c = desc.FillColor
+			if c.G > c.R + 0.08 and c.G > c.B + 0.08 then
+				return true
+			end
 		end
 	end
 
@@ -161,7 +159,8 @@ end
 
 local function createTrackerForEnemy(characterModel, ownerPlayer)
 	if trackedModels[characterModel] then return end
-	if shouldIgnorePlayer(ownerPlayer, characterModel) then return end
+	if not ownerPlayer or ownerPlayer == LocalPlayer then return end
+	if isAllyByGreenIndicator(characterModel) then return end
 
 	local humanoid = characterModel:FindFirstChildOfClass("Humanoid")
 	local rootPart = getTargetRootPart(characterModel)
@@ -259,7 +258,7 @@ end
 local function scanEnemies()
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player.Character then
-			if not shouldIgnorePlayer(player, player.Character) then
+			if not isAllyByGreenIndicator(player.Character) then
 				createTrackerForEnemy(player.Character, player)
 			end
 		end
@@ -293,7 +292,7 @@ RunService.Heartbeat:Connect(function(deltaTime)
 		if not characterModel.Parent
 			or not ownerPlayer
 			or not ownerPlayer.Parent
-			or shouldIgnorePlayer(ownerPlayer, characterModel)
+			or isAllyByGreenIndicator(characterModel)
 			or not data.RootPart.Parent
 			or not data.Humanoid.Parent
 			or data.Humanoid.Health <= 0
@@ -316,6 +315,16 @@ RunService.Heartbeat:Connect(function(deltaTime)
 
 				data.InfoLabel.Text = string.format("%s [%dm | %d%%]", ownerPlayer.DisplayName, math.floor(distance), math.floor(hpRatio * 100))
 				data.HealthFill.Size = UDim2.fromScale(hpRatio, 1)
+				data.HealthFill.BackgroundColor3 = Color3.fromHSV(hpRatio * 0.33, 0.85, 0.95)
+			end
+		end
+	end
+
+	counterLabel.Text = tostring(drawnEnemyCount)
+end)
+
+scanEnemies()
+lthFill.Size = UDim2.fromScale(hpRatio, 1)
 				data.HealthFill.BackgroundColor3 = Color3.fromHSV(hpRatio * 0.33, 0.85, 0.95)
 			end
 		end
