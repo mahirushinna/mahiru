@@ -1,11 +1,10 @@
 --[[
-	TacticalLocator_Mobile_v2.lua
-	Khắc phục:
-	1. Tương thích 100% trình biên dịch Luau tiêu chuẩn (bỏ cú pháp type/strict gây lỗi ngầm).
-	2. Đặt giao diện trong PlayerGui (ResetOnSpawn = false) để không bị mất khi nhân vật chết và hồi sinh.
-	3. Kết hợp BoxHandleAdornment + Khung 2D BillboardGui (AlwaysOnTop) + Highlight để hiển thị xuyên tường trên mọi mức đồ họa Mobile.
-	4. Tự động nhận diện cả Player thật và Bot/NPC có Humanoid trong Workspace (phù hợp chế độ Free-For-All).
-	5. Tích hợp nút Bật/Tắt ngay trên màn hình cảm ứng điện thoại.
+	TacticalLocator_Mobile_v3.lua
+	Cập nhật:
+	1. Chỉ định vị KẺ ĐỊCH (TeamCheck = true), tự động ẩn và xóa hoàn toàn ESP trên đồng đội.
+	2. Loại bỏ lỗi nhận diện nhầm tay cầm súng góc nhìn thứ nhất (Viewmodel trong Camera).
+	3. Thêm bộ đếm tổng số kẻ địch đang được ESP vẽ (ví dụ: 7, 9) nằm ngay dưới dòng chữ
+	   "Xác nhận vụ giết đồng đội" ở chính giữa phía trên màn hình.
 ]]
 
 local Players = game:GetService("Players")
@@ -15,29 +14,25 @@ local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
--- Dọn dẹp bản chạy cũ nếu thực thi lại script
-local OLD_GUI_NAME = "TacticalLocatorOverlay"
-local existingGui = PlayerGui:FindFirstChild(OLD_GUI_NAME)
-if existingGui then
-	existingGui:Destroy()
+-- Xóa giao diện cũ nếu chạy lại script
+local GUI_NAME = "TacticalLocatorOverlay"
+local oldGui = PlayerGui:FindFirstChild(GUI_NAME)
+if oldGui then
+	oldGui:Destroy()
 end
 
 local CONFIG = {
 	Enabled = true,
-	TeamCheck = false,          -- Tắt mặc định để hiển thị toàn bộ mục tiêu trong chế độ Miễn phí cho tất cả (FFA)
-	ScanWorkspaceNPCs = true,   -- Quét cả Bot/NPC trong Workspace
-	MaxDistance = 2000,         -- Khoảng cách hiển thị tối đa (studs)
-	RefreshRate = 0.08,         -- Chu kỳ cập nhật khoảng cách & máu (giây)
-	ScanInterval = 1.5,         -- Chu kỳ quét mục tiêu mới trong Workspace (giây)
-	
-	EnemyColor = Color3.fromRGB(255, 60, 60),
-	TeamColor = Color3.fromRGB(50, 210, 255),
-	BotColor = Color3.fromRGB(255, 190, 50),
+	EnemyOnly = true,           -- Chỉ hiển thị kẻ địch, bỏ qua đồng đội
+	MaxDistance = 2000,         -- Khoảng cách tối đa (studs)
+	RefreshRate = 0.06,         -- Chu kỳ cập nhật vị trí & bộ đếm (giây)
+	ScanInterval = 1.0,         -- Chu kỳ quét mục tiêu mới (giây)
+	EnemyColor = Color3.fromRGB(255, 55, 55),
 }
 
--- Khởi tạo ScreenGui chứa toàn bộ lớp định vị (không bị xóa khi hồi sinh)
+-- Khởi tạo ScreenGui chính
 local mainGui = Instance.new("ScreenGui")
-mainGui.Name = OLD_GUI_NAME
+mainGui.Name = GUI_NAME
 mainGui.ResetOnSpawn = false
 mainGui.IgnoreGuiInset = true
 mainGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
@@ -47,7 +42,45 @@ local containerFolder = Instance.new("Folder")
 containerFolder.Name = "Trackers"
 containerFolder.Parent = mainGui
 
--- Nút điều khiển trên màn hình cảm ứng (Mobile UI)
+-- ==========================================
+-- 1. BỘ ĐẾM SỐ KẺ ĐỊCH ĐANG VẼ (DƯỚI CHỮ "XÁC NHẬN VỤ GIẾT ĐỒNG ĐỘI")
+-- ==========================================
+local counterFrame = Instance.new("Frame")
+counterFrame.Name = "EnemyCounterFrame"
+counterFrame.AnchorPoint = Vector2.new(0.5, 0)
+-- Đặt ở chính giữa phía trên, ngay dưới thanh "Xác nhận vụ giết đồng đội | Thời gian"
+counterFrame.Position = UDim2.new(0.5, 0, 0, 36)
+counterFrame.Size = UDim2.fromOffset(56, 28)
+counterFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+counterFrame.BackgroundTransparency = 0.25
+counterFrame.BorderSizePixel = 0
+counterFrame.Active = true
+counterFrame.Draggable = true -- Có thể kéo nhẹ nếu muốn chỉnh vị trí
+counterFrame.Parent = mainGui
+
+local counterCorner = Instance.new("UICorner")
+counterCorner.CornerRadius = UDim.new(0, 8)
+counterCorner.Parent = counterFrame
+
+local counterStroke = Instance.new("UIStroke")
+counterStroke.Color = Color3.fromRGB(255, 70, 70)
+counterStroke.Thickness = 1.5
+counterStroke.Parent = counterFrame
+
+local counterLabel = Instance.new("TextLabel")
+counterLabel.Name = "CountText"
+counterLabel.Size = UDim2.fromScale(1, 1)
+counterLabel.BackgroundTransparency = 1
+counterLabel.Font = Enum.Font.GothamBlack
+counterLabel.TextSize = 18
+counterLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+counterLabel.TextStrokeTransparency = 0.2
+counterLabel.Text = "0"
+counterLabel.Parent = counterFrame
+
+-- ==========================================
+-- 2. NÚT BẬT / TẮT ESP TRÊN MÀN HÌNH CẢM ỨNG
+-- ==========================================
 local toggleButton = Instance.new("TextButton")
 toggleButton.Name = "ToggleButton"
 toggleButton.Size = UDim2.fromOffset(115, 34)
@@ -71,13 +104,17 @@ toggleButton.MouseButton1Click:Connect(function()
 	if CONFIG.Enabled then
 		toggleButton.Text = "ESP: BẬT"
 		toggleButton.BackgroundColor3 = Color3.fromRGB(25, 160, 85)
+		counterFrame.Visible = true
 	else
 		toggleButton.Text = "ESP: TẮT"
 		toggleButton.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
+		counterLabel.Text = "0"
 	end
 end)
 
--- Bảng lưu trữ các mục tiêu đang theo dõi: [Model] = TrackerData
+-- ==========================================
+-- 3. LOGIC KIỂM TRA ĐỒNG ĐỘI & MỤC TIÊU
+-- ==========================================
 local trackedModels = {}
 local updateTimer = 0
 local scanTimer = 0
@@ -108,33 +145,55 @@ local function getTargetRootPart(characterModel)
 		or characterModel.PrimaryPart
 end
 
-local function getTargetColor(characterModel, ownerPlayer)
-	if not ownerPlayer then
-		return CONFIG.BotColor
-	end
-	if LocalPlayer.Team and ownerPlayer.Team and not LocalPlayer.Neutral and not ownerPlayer.Neutral then
-		if LocalPlayer.Team == ownerPlayer.Team then
-			return CONFIG.TeamColor
-		end
-	end
-	return CONFIG.EnemyColor
-end
-
-local function isTeammate(ownerPlayer)
+-- Kiểm tra chính xác xem người chơi có phải đồng đội hay không
+local function isTeammate(ownerPlayer, characterModel)
 	if not ownerPlayer then
 		return false
 	end
-	if LocalPlayer.Team and ownerPlayer.Team and not LocalPlayer.Neutral and not ownerPlayer.Neutral then
-		return LocalPlayer.Team == ownerPlayer.Team
+	if ownerPlayer == LocalPlayer then
+		return true
 	end
+
+	-- Kiểm tra qua dịch vụ Teams chuẩn của Roblox
+	if LocalPlayer.Team ~= nil and ownerPlayer.Team ~= nil then
+		if not LocalPlayer.Neutral and not ownerPlayer.Neutral then
+			return LocalPlayer.Team == ownerPlayer.Team
+		end
+	end
+
+	-- Kiểm tra qua TeamColor nếu game chỉ gán màu đội
+	if not LocalPlayer.Neutral and not ownerPlayer.Neutral then
+		if LocalPlayer.TeamColor == ownerPlayer.TeamColor then
+			return true
+		end
+	end
+
+	-- Kiểm tra Attribute Team tùy chỉnh (nếu có)
+	local localTeamAttr = LocalPlayer:GetAttribute("Team") or (LocalPlayer.Character and LocalPlayer.Character:GetAttribute("Team"))
+	local targetTeamAttr = ownerPlayer:GetAttribute("Team") or (characterModel and characterModel:GetAttribute("Team"))
+	if localTeamAttr ~= nil and targetTeamAttr ~= nil and localTeamAttr == targetTeamAttr then
+		return true
+	end
+
 	return false
 end
 
-local function createTrackerForModel(characterModel, ownerPlayer)
+local function createTrackerForEnemy(characterModel, ownerPlayer)
 	if trackedModels[characterModel] then
 		return
 	end
+	if not ownerPlayer or ownerPlayer == LocalPlayer then
+		return
+	end
 	if characterModel == LocalPlayer.Character then
+		return
+	end
+	-- Bỏ qua mọi mô hình nằm trong Camera (tránh tô nhầm tay súng góc nhìn thứ nhất)
+	if Workspace.CurrentCamera and characterModel:IsDescendantOf(Workspace.CurrentCamera) then
+		return
+	end
+	-- Nếu là đồng đội thì tuyệt đối không tạo ESP
+	if CONFIG.EnemyOnly and isTeammate(ownerPlayer, characterModel) then
 		return
 	end
 
@@ -144,11 +203,11 @@ local function createTrackerForModel(characterModel, ownerPlayer)
 		return
 	end
 
-	local color = getTargetColor(characterModel, ownerPlayer)
+	local color = CONFIG.EnemyColor
 
-	-- 1. Hộp 3D xuyên tường (Hoạt động trên mọi cấu hình Mobile, không giới hạn 31 đối tượng)
+	-- 1. Hộp 3D xuyên tường
 	local boxAdorn = Instance.new("BoxHandleAdornment")
-	boxAdorn.Name = "TacticalBox3D"
+	boxAdorn.Name = "EnemyBox3D"
 	boxAdorn.Adornee = rootPart
 	boxAdorn.AlwaysOnTop = true
 	boxAdorn.ZIndex = 5
@@ -157,9 +216,9 @@ local function createTrackerForModel(characterModel, ownerPlayer)
 	boxAdorn.Transparency = 0.55
 	boxAdorn.Parent = containerFolder
 
-	-- 2. BillboardGui hiển thị khung 2D, Tên, Khoảng cách và Thanh máu
+	-- 2. BillboardGui hiển thị Tên, Khoảng cách & Thanh máu
 	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "TacticalBillboard"
+	billboard.Name = "EnemyBillboard"
 	billboard.Adornee = rootPart
 	billboard.AlwaysOnTop = true
 	billboard.Size = UDim2.fromOffset(150, 50)
@@ -174,7 +233,7 @@ local function createTrackerForModel(characterModel, ownerPlayer)
 	infoLabel.TextSize = 12
 	infoLabel.TextStrokeTransparency = 0.15
 	infoLabel.TextColor3 = color
-	infoLabel.Text = ownerPlayer and ownerPlayer.DisplayName or characterModel.Name
+	infoLabel.Text = ownerPlayer.DisplayName
 	infoLabel.Parent = billboard
 
 	local healthBg = Instance.new("Frame")
@@ -193,7 +252,6 @@ local function createTrackerForModel(characterModel, ownerPlayer)
 	healthFill.BorderSizePixel = 0
 	healthFill.Parent = healthBg
 
-	-- Chấm tâm đánh dấu vị trí mục tiêu
 	local markerDot = Instance.new("Frame")
 	markerDot.Name = "CenterDot"
 	markerDot.Size = UDim2.fromOffset(8, 8)
@@ -207,9 +265,9 @@ local function createTrackerForModel(characterModel, ownerPlayer)
 	dotCorner.CornerRadius = UDim.new(1, 0)
 	dotCorner.Parent = markerDot
 
-	-- 3. Highlight viền nhân vật (bổ trợ khi thiết bị hỗ trợ)
+	-- 3. Highlight viền đỏ cho kẻ địch
 	local highlight = Instance.new("Highlight")
-	highlight.Name = "TacticalHighlight"
+	highlight.Name = "EnemyHighlight"
 	highlight.Adornee = characterModel
 	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 	highlight.FillColor = color
@@ -232,41 +290,25 @@ local function createTrackerForModel(characterModel, ownerPlayer)
 	}
 end
 
--- Quét toàn bộ người chơi và các mô hình NPC/Bot trong Workspace
-local function scanTargets()
-	local localChar = LocalPlayer.Character
-
-	-- 1. Quét từ danh sách Players
+-- Quét danh sách người chơi để gắn ESP cho kẻ địch
+local function scanEnemies()
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player ~= LocalPlayer and player.Character then
-			createTrackerForModel(player.Character, player)
-		end
-	end
-
-	-- 2. Quét các mô hình nhân vật/Bot trong Workspace (dành cho game bắn súng dùng Bot hoặc thư mục nhân vật riêng)
-	if CONFIG.ScanWorkspaceNPCs then
-		for _, descendant in ipairs(Workspace:GetDescendants()) do
-			if descendant:IsA("Humanoid") then
-				local model = descendant.Parent
-				if model and model:IsA("Model") and model ~= localChar and not trackedModels[model] then
-					local owner = Players:GetPlayerFromCharacter(model)
-					if owner ~= LocalPlayer then
-						createTrackerForModel(model, owner)
-					end
-				end
+			if not (CONFIG.EnemyOnly and isTeammate(player, player.Character)) then
+				createTrackerForEnemy(player.Character, player)
 			end
 		end
 	end
 end
 
--- Vòng lặp cập nhật vị trí, máu và trạng thái hiển thị
+-- Vòng lặp cập nhật vị trí và đếm tổng số kẻ địch đang được vẽ
 RunService.Heartbeat:Connect(function(deltaTime)
 	updateTimer = updateTimer + deltaTime
 	scanTimer = scanTimer + deltaTime
 
 	if scanTimer >= CONFIG.ScanInterval then
 		scanTimer = 0
-		scanTargets()
+		scanEnemies()
 	end
 
 	if updateTimer < CONFIG.RefreshRate then
@@ -279,50 +321,46 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	local localRoot = localChar and getTargetRootPart(localChar)
 	local originPos = (localRoot and localRoot.Position) or (camera and camera.CFrame.Position) or Vector3.zero
 
+	local drawnEnemyCount = 0
+
 	for characterModel, data in pairs(trackedModels) do
-		-- Kiểm tra mục tiêu còn tồn tại và còn sống hay không
+		local ownerPlayer = data.OwnerPlayer
+
+		-- Nếu mục tiêu đã chết, thoát game, hoặc chuyển sang cùng đội với mình -> Xóa ngay lập tức
 		if not characterModel.Parent
+			or not ownerPlayer
+			or not ownerPlayer.Parent
 			or characterModel == localChar
 			or not data.RootPart.Parent
 			or not data.Humanoid.Parent
 			or data.Humanoid.Health <= 0
+			or (CONFIG.EnemyOnly and isTeammate(ownerPlayer, characterModel))
 		then
 			cleanupModelTracker(characterModel)
 		else
-			local shouldShow = CONFIG.Enabled
-			if shouldShow and CONFIG.TeamCheck and isTeammate(data.OwnerPlayer) then
-				shouldShow = false
-			end
-
 			local distance = (originPos - data.RootPart.Position).Magnitude
-			if distance > CONFIG.MaxDistance then
-				shouldShow = false
-			end
+			local shouldShow = CONFIG.Enabled and (distance <= CONFIG.MaxDistance)
 
 			data.BoxAdornment.Visible = shouldShow
 			data.Billboard.Enabled = shouldShow
 			data.Highlight.Enabled = shouldShow
 
 			if shouldShow then
-				local color = getTargetColor(characterModel, data.OwnerPlayer)
+				drawnEnemyCount = drawnEnemyCount + 1
+
 				local maxHp = math.max(data.Humanoid.MaxHealth, 1)
 				local curHp = math.clamp(data.Humanoid.Health, 0, maxHp)
 				local hpRatio = curHp / maxHp
 
-				local displayName = data.OwnerPlayer and data.OwnerPlayer.DisplayName or characterModel.Name
-				data.InfoLabel.TextColor3 = color
-				data.InfoLabel.Text = string.format("%s [%dm | %d%%]", displayName, math.floor(distance), math.floor(hpRatio * 100))
-
+				data.InfoLabel.Text = string.format("%s [%dm | %d%%]", ownerPlayer.DisplayName, math.floor(distance), math.floor(hpRatio * 100))
 				data.HealthFill.Size = UDim2.fromScale(hpRatio, 1)
 				data.HealthFill.BackgroundColor3 = Color3.fromHSV(hpRatio * 0.33, 0.85, 0.95)
-
-				data.BoxAdornment.Color3 = color
-				data.MarkerDot.BackgroundColor3 = color
-				data.Highlight.FillColor = color
 			end
 		end
 	end
+
+	-- Cập nhật con số tổng kẻ địch đang được ESP vẽ ngay dưới dòng chữ trên cùng
+	counterLabel.Text = tostring(drawnEnemyCount)
 end)
 
--- Chạy quét lần đầu ngay khi khởi tạo
-scanTargets()
+scanEnemies()
