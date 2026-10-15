@@ -2,85 +2,81 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+    Players.PlayerAdded:Wait()
+    LocalPlayer = Players.LocalPlayer
+end
+
 local Camera = Workspace.CurrentCamera
 
--- Trạng thái cấu hình
+-- Bật sẵn (true) để kiểm tra hiệu lực ngay khi vừa chạy script
 local Config = {
-    ESP_Name = false,
-    ESP_Health = false,
-    ESP_Distance = false,
-    Aimbot_Enabled = false,
+    ESP_Name = true,
+    ESP_Health = true,
+    ESP_Distance = true,
+    Aimbot_Enabled = true,
     Menu_Visible = true
 }
 
--- Quản lý trạng thái bắn trên Mobile & PC
-local IsShootingTouch = false
-local ActiveTouches = {}
-
 -- ==========================================
--- 1. KHỞI TẠO GIAO DIỆN MENU & NÚT NỔI
+-- 1. KHỞI TẠO GIAO DIỆN TRỰC TIẾP TRÊN PLAYERGUI
 -- ==========================================
-local function getGuiParent()
-    local success, coreGui = pcall(function()
-        return game:GetService("CoreGui")
-    end)
-    if success and coreGui then
-        local testSuccess = pcall(function()
-            local folder = Instance.new("Folder")
-            folder.Parent = coreGui
-            folder:Destroy()
-        end)
-        if testSuccess then
-            return coreGui
-        end
-    end
-    return LocalPlayer:WaitForChild("PlayerGui")
-end
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
+local GuiParent = PlayerGui or game:GetService("CoreGui")
 
--- Xóa GUI cũ nếu chạy lại script
-local guiParent = getGuiParent()
-local oldGui = guiParent:FindFirstChild("MrDon_FPS_Menu")
+-- Dọn dẹp bản cũ và hủy liên kết RenderStep cũ nếu chạy lại
+pcall(function()
+    RunService:UnbindFromRenderStep("MrDon_FastAimbot")
+end)
+
+local oldGui = GuiParent:FindFirstChild("MrDon_FPS_Overlay")
 if oldGui then
     oldGui:Destroy()
 end
 
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "MrDon_FPS_Menu"
+ScreenGui.Name = "MrDon_FPS_Overlay"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999999 -- Luôn nổi trên cùng mọi HUD của game
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = guiParent
+ScreenGui.Parent = GuiParent
 
--- Nút nổi (Floating Button) bật/tắt Menu
+-- Thư mục chứa nhãn ESP 2D trên màn hình (không bị game xóa như BillboardGui)
+local ESPContainer = Instance.new("Folder")
+ESPContainer.Name = "ESP_Container"
+ESPContainer.Parent = ScreenGui
+
+-- Nút nổi (Floating Button) điều khiển ẩn/hiện Menu
 local FloatingBtn = Instance.new("TextButton")
 FloatingBtn.Name = "FloatingToggle"
-FloatingBtn.Size = UDim2.new(0, 56, 0, 56)
-FloatingBtn.Position = UDim2.new(0.05, 0, 0.4, 0)
-FloatingBtn.BackgroundColor3 = Color3.fromRGB(25, 30, 40)
-FloatingBtn.BorderColor3 = Color3.fromRGB(0, 200, 120)
+FloatingBtn.Size = UDim2.new(0, 58, 0, 58)
+FloatingBtn.Position = UDim2.new(0.12, 0, 0.22, 0)
+FloatingBtn.BackgroundColor3 = Color3.fromRGB(20, 25, 35)
+FloatingBtn.BorderColor3 = Color3.fromRGB(0, 230, 130)
 FloatingBtn.BorderSizePixel = 2
+FloatingBtn.ZIndex = 100
 FloatingBtn.Text = "MENU"
-FloatingBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+FloatingBtn.TextColor3 = Color3.fromRGB(0, 255, 150)
 FloatingBtn.Font = Enum.Font.GothamBold
 FloatingBtn.TextSize = 13
-FloatingBtn.AutoButtonColor = true
 FloatingBtn.Parent = ScreenGui
 
 local FloatCorner = Instance.new("UICorner")
 FloatCorner.CornerRadius = UDim.new(1, 0)
 FloatCorner.Parent = FloatingBtn
 
--- Bảng Menu Chính
+-- Bảng Menu Chính (Chia 2 phần: ESP & Aimbot)
 local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
-MainFrame.Size = UDim2.new(0, 340, 0, 240)
-MainFrame.Position = UDim2.new(0.5, -170, 0.5, -120)
-MainFrame.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
+MainFrame.Size = UDim2.new(0, 340, 0, 235)
+MainFrame.Position = UDim2.new(0.5, -170, 0.5, -117)
+MainFrame.BackgroundColor3 = Color3.fromRGB(18, 20, 26)
 MainFrame.BorderSizePixel = 0
+MainFrame.ZIndex = 90
 MainFrame.Visible = Config.Menu_Visible
 MainFrame.Parent = ScreenGui
 
@@ -89,15 +85,16 @@ MainCorner.CornerRadius = UDim.new(0, 10)
 MainCorner.Parent = MainFrame
 
 local MainStroke = Instance.new("UIStroke")
-MainStroke.Color = Color3.fromRGB(60, 70, 90)
+MainStroke.Color = Color3.fromRGB(0, 200, 120)
 MainStroke.Thickness = 1.5
 MainStroke.Parent = MainFrame
 
 -- Thanh tiêu đề
 local TitleBar = Instance.new("Frame")
 TitleBar.Size = UDim2.new(1, 0, 0, 36)
-TitleBar.BackgroundColor3 = Color3.fromRGB(30, 34, 44)
+TitleBar.BackgroundColor3 = Color3.fromRGB(28, 32, 42)
 TitleBar.BorderSizePixel = 0
+TitleBar.ZIndex = 91
 TitleBar.Parent = MainFrame
 
 local TitleCorner = Instance.new("UICorner")
@@ -106,28 +103,30 @@ TitleCorner.Parent = TitleBar
 
 local TitleLabel = Instance.new("TextLabel")
 TitleLabel.Size = UDim2.new(1, -20, 1, 0)
-TitleLabel.Position = UDim2.new(0, 10, 0, 0)
+TitleLabel.Position = UDim2.new(0, 12, 0, 0)
 TitleLabel.BackgroundTransparency = 1
-TitleLabel.Text = "BẢNG ĐIỀU KHIỂN: ESP & AIMBOT"
-TitleLabel.TextColor3 = Color3.fromRGB(235, 240, 255)
+TitleLabel.ZIndex = 92
+TitleLabel.Text = "MENU CHỨC NĂNG: ESP & AIMBOT"
+TitleLabel.TextColor3 = Color3.fromRGB(240, 245, 255)
 TitleLabel.Font = Enum.Font.GothamBold
-TitleLabel.TextSize = 14
+TitleLabel.TextSize = 13
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
 TitleLabel.Parent = TitleBar
 
--- Chia 2 cột: Phần ESP (Trái) và Phần Aimbot (Phải)
+-- Khung nội dung chia 2 cột
 local ContentFrame = Instance.new("Frame")
-ContentFrame.Size = UDim2.new(1, -20, 1, -48)
-ContentFrame.Position = UDim2.new(0, 10, 0, 42)
+ContentFrame.Size = UDim2.new(1, -20, 1, -46)
+ContentFrame.Position = UDim2.new(0, 10, 0, 40)
 ContentFrame.BackgroundTransparency = 1
+ContentFrame.ZIndex = 91
 ContentFrame.Parent = MainFrame
 
 local LeftColumn = Instance.new("Frame")
-LeftColumn.Name = "ESPSection"
-LeftColumn.Size = UDim2.new(0.5, -6, 1, 0)
+LeftColumn.Size = UDim2.new(0.5, -5, 1, 0)
 LeftColumn.Position = UDim2.new(0, 0, 0, 0)
-LeftColumn.BackgroundColor3 = Color3.fromRGB(28, 31, 40)
+LeftColumn.BackgroundColor3 = Color3.fromRGB(26, 30, 38)
 LeftColumn.BorderSizePixel = 0
+LeftColumn.ZIndex = 91
 LeftColumn.Parent = ContentFrame
 
 local LeftCorner = Instance.new("UICorner")
@@ -135,116 +134,111 @@ LeftCorner.CornerRadius = UDim.new(0, 8)
 LeftCorner.Parent = LeftColumn
 
 local RightColumn = Instance.new("Frame")
-RightColumn.Name = "AimbotSection"
-RightColumn.Size = UDim2.new(0.5, -6, 1, 0)
-RightColumn.Position = UDim2.new(0.5, 6, 0, 0)
-RightColumn.BackgroundColor3 = Color3.fromRGB(28, 31, 40)
+RightColumn.Size = UDim2.new(0.5, -5, 1, 0)
+RightColumn.Position = UDim2.new(0.5, 5, 0, 0)
+RightColumn.BackgroundColor3 = Color3.fromRGB(26, 30, 38)
 RightColumn.BorderSizePixel = 0
+RightColumn.ZIndex = 91
 RightColumn.Parent = ContentFrame
 
 local RightCorner = Instance.new("UICorner")
 RightCorner.CornerRadius = UDim.new(0, 8)
 RightCorner.Parent = RightColumn
 
-local function createSectionHeader(parent, text)
-    local header = Instance.new("TextLabel")
-    header.Size = UDim2.new(1, 0, 0, 28)
-    header.BackgroundTransparency = 1
-    header.Text = text
-    header.TextColor3 = Color3.fromRGB(0, 210, 130)
-    header.Font = Enum.Font.GothamBold
-    header.TextSize = 13
-    header.Parent = parent
+local function createHeader(parent, text)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 0, 26)
+    lbl.BackgroundTransparency = 1
+    lbl.ZIndex = 92
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(0, 220, 130)
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 12
+    lbl.Parent = parent
 end
 
-createSectionHeader(LeftColumn, "PHẦN 1: ESP (ĐỊCH)")
-createSectionHeader(RightColumn, "PHẦN 2: AIMBOT")
+createHeader(LeftColumn, "PHẦN 1: ESP (ĐỊCH)")
+createHeader(RightColumn, "PHẦN 2: AIMBOT")
 
--- Hàm tạo nút bật/tắt chức năng
-local function createToggleButton(parent, labelText, orderIndex, configKey)
+local function createToggle(parent, title, index, key)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -16, 0, 38)
-    btn.Position = UDim2.new(0, 8, 0, 32 + (orderIndex - 1) * 46)
-    btn.BackgroundColor3 = Color3.fromRGB(45, 50, 62)
+    btn.Size = UDim2.new(1, -14, 0, 36)
+    btn.Position = UDim2.new(0, 7, 0, 30 + (index - 1) * 44)
     btn.BorderSizePixel = 0
+    btn.ZIndex = 93
     btn.Font = Enum.Font.GothamSemibold
     btn.TextSize = 12
-    btn.TextColor3 = Color3.fromRGB(220, 225, 235)
-    btn.Text = labelText .. ": TẮT"
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
     btn.Parent = parent
 
     local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(0, 6)
     corner.Parent = btn
 
-    local function updateVisual()
-        local state = Config[configKey]
-        if state then
-            btn.BackgroundColor3 = Color3.fromRGB(0, 165, 95)
-            btn.Text = labelText .. ": BẬT"
+    local function refresh()
+        if Config[key] then
+            btn.BackgroundColor3 = Color3.fromRGB(0, 170, 95)
+            btn.Text = title .. ": BẬT"
         else
-            btn.BackgroundColor3 = Color3.fromRGB(45, 50, 62)
-            btn.Text = labelText .. ": TẮT"
+            btn.BackgroundColor3 = Color3.fromRGB(50, 55, 68)
+            btn.Text = title .. ": TẮT"
         end
     end
 
-    btn.MouseButton1Click:Connect(function()
-        Config[configKey] = not Config[configKey]
-        updateVisual()
+    btn.Activated:Connect(function()
+        Config[key] = not Config[key]
+        refresh()
     end)
 
-    updateVisual()
-    return btn
+    refresh()
 end
 
--- Tạo các nút trong phần ESP
-createToggleButton(LeftColumn, "ESP Tên", 1, "ESP_Name")
-createToggleButton(LeftColumn, "ESP Máu", 2, "ESP_Health")
-createToggleButton(LeftColumn, "ESP Khoảng Cách", 3, "ESP_Distance")
+createToggle(LeftColumn, "ESP Tên", 1, "ESP_Name")
+createToggle(LeftColumn, "ESP Máu", 2, "ESP_Health")
+createToggle(LeftColumn, "ESP Khoảng Cách", 3, "ESP_Distance")
+createToggle(RightColumn, "Aimbot Đầu", 1, "Aimbot_Enabled")
 
--- Tạo nút trong phần Aimbot
-createToggleButton(RightColumn, "Aimbot Đầu", 1, "Aimbot_Enabled")
+local InfoText = Instance.new("TextLabel")
+InfoText.Size = UDim2.new(1, -14, 0, 85)
+InfoText.Position = UDim2.new(0, 7, 0, 78)
+InfoText.BackgroundTransparency = 1
+InfoText.ZIndex = 92
+InfoText.TextWrapped = true
+InfoText.TextYAlignment = Enum.TextYAlignment.Top
+InfoText.Text = "Khóa tức thì (0ms) vào ĐẦU kẻ địch gần tâm súng nhất khi bấm nút bắn.\n\nLoại trừ đồng đội có chữ/ô vuông xanh lá."
+InfoText.TextColor3 = Color3.fromRGB(165, 175, 190)
+InfoText.Font = Enum.Font.Gotham
+InfoText.TextSize = 11
+InfoText.Parent = RightColumn
 
-local AimNote = Instance.new("TextLabel")
-AimNote.Size = UDim2.new(1, -16, 0, 80)
-AimNote.Position = UDim2.new(0, 8, 0, 82)
-AimNote.BackgroundTransparency = 1
-AimNote.TextWrapped = true
-AimNote.TextYAlignment = Enum.TextYAlignment.Top
-AimNote.Text = "Tự động ghim tâm vào ĐẦU đối thủ gần tâm súng nhất khi bóp cò.\n\nBỏ qua đồng đội có chữ hoặc ô vuông xanh lá."
-AimNote.TextColor3 = Color3.fromRGB(160, 170, 185)
-AimNote.Font = Enum.Font.Gotham
-AimNote.TextSize = 11
-AimNote.Parent = RightColumn
-
--- Hàm hỗ trợ kéo thả UI (cho cả Nút Nổi và Bảng Menu)
-local function makeDraggable(dragHandle, targetFrame, onClickCallback)
+-- Hỗ trợ kéo thả mượt trên màn hình cảm ứng Mobile
+local function enableDrag(handle, target, onTap)
     local dragging = false
     local dragInput = nil
     local dragStart = nil
     local startPos = nil
-    local moved = false
+    local hasMoved = false
 
-    dragHandle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
-            moved = false
+            hasMoved = false
             dragStart = input.Position
-            startPos = targetFrame.Position
+            startPos = target.Position
 
             input.Changed:Connect(function()
                 if input.UserInputState == Enum.UserInputState.End then
                     dragging = false
-                    if not moved and onClickCallback then
-                        onClickCallback()
+                    if not hasMoved and onTap then
+                        onTap()
                     end
                 end
             end)
         end
     end)
 
-    dragHandle.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+    handle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement then
             dragInput = input
         end
     end)
@@ -252,10 +246,10 @@ local function makeDraggable(dragHandle, targetFrame, onClickCallback)
     UserInputService.InputChanged:Connect(function(input)
         if input == dragInput and dragging then
             local delta = input.Position - dragStart
-            if delta.Magnitude > 6 then
-                moved = true
+            if delta.Magnitude > 8 then
+                hasMoved = true
             end
-            targetFrame.Position = UDim2.new(
+            target.Position = UDim2.new(
                 startPos.X.Scale,
                 startPos.X.Offset + delta.X,
                 startPos.Y.Scale,
@@ -265,74 +259,118 @@ local function makeDraggable(dragHandle, targetFrame, onClickCallback)
     end)
 end
 
-makeDraggable(FloatingBtn, FloatingBtn, function()
+enableDrag(FloatingBtn, FloatingBtn, function()
     Config.Menu_Visible = not Config.Menu_Visible
     MainFrame.Visible = Config.Menu_Visible
 end)
 
-makeDraggable(TitleBar, MainFrame, nil)
+enableDrag(TitleBar, MainFrame, nil)
 
 -- ==========================================
--- 2. NHẬN DIỆN ĐỒNG ĐỘI (CHỮ/Ô VUÔNG XANH LÁ)
+-- 2. BỘ LỌC ĐỒNG ĐỘI & BỘ ĐỆM MỤC TIÊU (CHỐNG LAG)
 -- ==========================================
--- Kiểm tra xem một màu Color3 có phải màu xanh lá cây đặc trưng của đồng đội hay không
-local function isGreenIndicatorColor(color)
-    if not color then return false end
-    -- Màu xanh lá cây trên tên đồng đội hoặc ô vuông xanh lá có kênh G cao vượt trội so với R và B
-    return (color.G > 0.55) and (color.G > color.R * 1.4) and (color.G > color.B * 1.3)
+local CachedEnemies = {}
+local ESPLabels = {}
+
+-- Nhận diện màu xanh lá cây của tên đồng đội hoặc ô vuông xanh lá
+local function isGreenColor(c)
+    if not c then return false end
+    return (c.G > 0.52) and (c.G > c.R * 1.35) and (c.G > c.B * 1.25)
 end
 
-local function hasGreenMarkerInInstance(rootInstance)
-    if not rootInstance then return false end
-    for _, desc in ipairs(rootInstance:GetDescendants()) do
-        -- Bỏ qua chính GUI ESP của chúng ta
-        if desc.Name == "MrDon_ESP_Tag" or (desc.Parent and desc.Parent.Name == "MrDon_ESP_Tag") then
-            continue
-        end
-
-        if desc:IsA("TextLabel") or desc:IsA("TextButton") then
-            if desc.Visible and isGreenIndicatorColor(desc.TextColor3) then
-                return true
-            end
-        elseif desc:IsA("Frame") then
-            if desc.Visible and desc.BackgroundTransparency < 0.95 and isGreenIndicatorColor(desc.BackgroundColor3) then
-                return true
-            end
-        elseif desc:IsA("ImageLabel") or desc:IsA("ImageButton") then
-            if desc.Visible and desc.ImageTransparency < 0.95 and isGreenIndicatorColor(desc.ImageColor3) then
-                return true
-            end
-        elseif desc:IsA("Highlight") then
-            if desc.Enabled and (isGreenIndicatorColor(desc.FillColor) or isGreenIndicatorColor(desc.OutlineColor)) then
-                return true
-            end
+local function checkInstanceHasGreenUI(inst)
+    for _, d in ipairs(inst:GetDescendants()) do
+        if d:IsA("TextLabel") and d.Visible and isGreenColor(d.TextColor3) then
+            return true
+        elseif d:IsA("Frame") and d.Visible and d.BackgroundTransparency < 0.95 and isGreenColor(d.BackgroundColor3) then
+            return true
+        elseif d:IsA("ImageLabel") and d.Visible and d.ImageTransparency < 0.95 and isGreenColor(d.ImageColor3) then
+            return true
+        elseif d:IsA("Highlight") and d.Enabled and (isGreenColor(d.FillColor) or isGreenColor(d.OutlineColor)) then
+            return true
         end
     end
     return false
 end
 
-local function isTeammate(player, character)
-    if player == LocalPlayer then
+-- Thu thập các Adornee hoặc vị trí màn hình của chỉ báo xanh lá trong PlayerGui
+local function getGreenTeammateMarkers()
+    local greenAdornees = {}
+    local greenScreenPositions = {}
+    local greenNames = {}
+
+    if PlayerGui then
+        local viewport = Camera and Camera.ViewportSize or Vector2.new(1920, 1080)
+        for _, d in ipairs(PlayerGui:GetDescendants()) do
+            if not d:IsDescendantOf(ScreenGui) then
+                -- Nếu game gắn BillboardGui trong PlayerGui và trỏ Adornee vào nhân vật đồng đội
+                if d:IsA("BillboardGui") and d.Enabled and d.Adornee then
+                    if checkInstanceHasGreenUI(d) then
+                        greenAdornees[d.Adornee] = true
+                    end
+                elseif d:IsA("TextLabel") and d.Visible and isGreenColor(d.TextColor3) then
+                    local absPos = d.AbsolutePosition
+                    -- Loại trừ vùng bảng thông báo hạ gục ở góc trên bên phải màn hình
+                    local isKillfeed = (absPos.X > viewport.X * 0.65 and absPos.Y < viewport.Y * 0.25)
+                    if not isKillfeed and #d.Text >= 3 then
+                        greenNames[d.Text] = true
+                        table.insert(greenScreenPositions, absPos + (d.AbsoluteSize * 0.5))
+                    end
+                elseif (d:IsA("Frame") and d.Visible and d.BackgroundTransparency < 0.9 and isGreenColor(d.BackgroundColor3))
+                    or (d:IsA("ImageLabel") and d.Visible and d.ImageTransparency < 0.9 and isGreenColor(d.ImageColor3)) then
+                    local size = d.AbsoluteSize
+                    -- Nhận diện hình vuông nhỏ màu xanh lá cây của đồng đội trên màn hình
+                    if size.X >= 4 and size.X <= 45 and size.Y >= 4 and size.Y <= 45 then
+                        local center = d.AbsolutePosition + (size * 0.5)
+                        -- Bỏ qua thanh máu của bản thân ở góc dưới bên trái
+                        if not (center.X < viewport.X * 0.25 and center.Y > viewport.Y * 0.80) then
+                            table.insert(greenScreenPositions, center)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return greenAdornees, greenScreenPositions, greenNames
+end
+
+local function isCharacterTeammate(plr, char, head, greenAdornees, greenScreenPositions, greenNames)
+    if plr == LocalPlayer or char == LocalPlayer.Character then
         return true
     end
 
-    -- 1. Kiểm tra Team mặc định của Roblox nếu game có phân chia Team
-    if player and LocalPlayer.Team ~= nil and player.Team ~= nil and not player.Neutral then
-        if player.Team == LocalPlayer.Team then
+    -- 1. Kiểm tra Team chuẩn của Roblox
+    if plr and LocalPlayer.Team ~= nil and plr.Team ~= nil and not plr.Neutral then
+        if plr.Team == LocalPlayer.Team then
             return true
         end
     end
 
-    -- 2. Kiểm tra BillboardGui / tên màu xanh lá hoặc hình vuông màu xanh lá gắn trên nhân vật
-    if character and hasGreenMarkerInInstance(character) then
+    -- 2. Kiểm tra tên trùng với chữ màu xanh lá cây trên màn hình
+    if greenNames[char.Name] or (plr and (greenNames[plr.Name] or greenNames[plr.DisplayName])) then
         return true
     end
 
-    -- 3. Kiểm tra nếu tên người chơi xuất hiện với màu chữ xanh lá trong PlayerGui (HUD marcador của game)
-    if player and LocalPlayer:FindFirstChild("PlayerGui") then
-        for _, desc in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
-            if desc:IsA("TextLabel") and desc.Visible then
-                if (desc.Text == player.Name or desc.Text == player.DisplayName) and isGreenIndicatorColor(desc.TextColor3) then
+    -- 3. Kiểm tra BillboardGui gắn trực tiếp trong mô hình nhân vật
+    if checkInstanceHasGreenUI(char) then
+        return true
+    end
+
+    -- 4. Kiểm tra BillboardGui trong PlayerGui có Adornee trỏ vào nhân vật
+    for adornee, _ in pairs(greenAdornees) do
+        if adornee == char or adornee:IsDescendantOf(char) then
+            return true
+        end
+    end
+
+    -- 5. Kiểm tra nếu vị trí đầu nhân vật trên màn hình trùng khớp với ô vuông xanh lá / tên xanh lá
+    if Camera and head and #greenScreenPositions > 0 then
+        local screenPt, onScreen = Camera:WorldToViewportPoint(head.Position)
+        if onScreen and screenPt.Z > 0 then
+            local head2D = Vector2.new(screenPt.X, screenPt.Y)
+            for _, markerPos in ipairs(greenScreenPositions) do
+                if (head2D - markerPos).Magnitude < 65 then
                     return true
                 end
             end
@@ -342,223 +380,218 @@ local function isTeammate(player, character)
     return false
 end
 
--- Lấy danh sách các mục tiêu hợp lệ (cả Player lẫn Bot trong trận đấu)
-local function getPotentialTargets()
-    local targets = {}
-    local seenCharacters = {}
+-- Quét và cập nhật danh sách KẺ ĐỊCH mỗi 0.35 giây (giữ FPS luôn mượt 60FPS)
+task.spawn(function()
+    while ScreenGui.Parent do
+        local newEnemies = {}
+        local seenChars = {}
+        local greenAdornees, greenScreenPositions, greenNames = getGreenTeammateMarkers()
 
-    -- Quét từ danh sách Players
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            seenCharacters[plr.Character] = true
-            table.insert(targets, {
-                Player = plr,
-                Character = plr.Character,
-                DisplayName = plr.DisplayName or plr.Name
-            })
-        end
-    end
+        local function evaluateModel(char, plr)
+            if not char or seenChars[char] or char == LocalPlayer.Character then return end
+            seenChars[char] = true
 
-    -- Quét thêm các mô hình nhân vật (Bot như BurnerBot556, ThunderRobot3000) trong Workspace
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("Humanoid") and obj.Parent and obj.Parent:IsA("Model") then
-            local char = obj.Parent
-            if char ~= LocalPlayer.Character and not seenCharacters[char] and char:FindFirstChild("Head") then
-                seenCharacters[char] = true
-                local plr = Players:GetPlayerFromCharacter(char)
-                table.insert(targets, {
-                    Player = plr,
-                    Character = char,
-                    DisplayName = plr and (plr.DisplayName or plr.Name) or char.Name
-                })
+            local head = char:FindFirstChild("Head")
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if head and hum and hum.Health > 0 then
+                if not isCharacterTeammate(plr, char, head, greenAdornees, greenScreenPositions, greenNames) then
+                    table.insert(newEnemies, {
+                        Character = char,
+                        Head = head,
+                        Humanoid = hum,
+                        Root = char:FindFirstChild("HumanoidRootPart") or head,
+                        Name = (plr and (plr.DisplayName or plr.Name)) or char.Name
+                    })
+                end
             end
         end
-    end
 
-    return targets
-end
-
--- ==========================================
--- 3. HỆ THỐNG ESP (CHỈ ĐỊNH VỊ ĐỊCH)
--- ==========================================
-local function updateCharacterESP(targetData)
-    local char = targetData.Character
-    local plr = targetData.Player
-    if not char then return end
-
-    local head = char:FindFirstChild("Head")
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    local rootPart = char:FindFirstChild("HumanoidRootPart") or head
-
-    local existingEsp = head and head:FindFirstChild("MrDon_ESP_Tag")
-    local anyEspActive = Config.ESP_Name or Config.ESP_Health or Config.ESP_Distance
-
-    -- Nếu tắt toàn bộ ESP, mục tiêu đã chết, hoặc mục tiêu là ĐỒNG ĐỘI -> Ẩn/Xóa ESP
-    if not anyEspActive or not head or not humanoid or humanoid.Health <= 0 or isTeammate(plr, char) then
-        if existingEsp then
-            existingEsp.Enabled = false
-        end
-        return
-    end
-
-    -- Tạo mới BillboardGui nếu chưa có
-    if not existingEsp then
-        existingEsp = Instance.new("BillboardGui")
-        existingEsp.Name = "MrDon_ESP_Tag"
-        existingEsp.Adornee = head
-        existingEsp.Size = UDim2.new(0, 180, 0, 65)
-        existingEsp.StudsOffset = Vector3.new(0, 2.6, 0)
-        existingEsp.AlwaysOnTop = true
-        existingEsp.Parent = head
-
-        local textLabel = Instance.new("TextLabel")
-        textLabel.Name = "InfoLabel"
-        textLabel.Size = UDim2.new(1, 0, 1, 0)
-        textLabel.BackgroundTransparency = 1
-        textLabel.TextColor3 = Color3.fromRGB(255, 65, 65) -- Màu đỏ nổi bật cho kẻ địch
-        textLabel.TextStrokeTransparency = 0.2
-        textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-        textLabel.Font = Enum.Font.GothamBold
-        textLabel.TextSize = 13
-        textLabel.Parent = existingEsp
-    end
-
-    existingEsp.Enabled = true
-    local infoLabel = existingEsp:FindFirstChild("InfoLabel")
-    if infoLabel then
-        local lines = {}
-
-        if Config.ESP_Name then
-            table.insert(lines, tostring(targetData.DisplayName))
-        end
-
-        if Config.ESP_Health then
-            local hp = math.floor(humanoid.Health)
-            local maxHp = math.floor(humanoid.MaxHealth)
-            table.insert(lines, string.format("Máu: %d / %d", hp, maxHp))
-        end
-
-        if Config.ESP_Distance and rootPart then
-            local myPos = Camera.CFrame.Position
-            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                myPos = LocalPlayer.Character.HumanoidRootPart.Position
+        -- Quét danh sách Players
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and plr.Character then
+                evaluateModel(plr.Character, plr)
             end
-            local dist = math.floor((rootPart.Position - myPos).Magnitude)
-            table.insert(lines, string.format("Khoảng cách: %dm", dist))
         end
 
-        infoLabel.Text = table.concat(lines, "\n")
+        -- Quét thêm các nhân vật / Bot trực tiếp trong Workspace (1 cấp và 2 cấp thư mục để không gây lag)
+        for _, child in ipairs(Workspace:GetChildren()) do
+            if child:IsA("Model") then
+                evaluateModel(child, Players:GetPlayerFromCharacter(child))
+            elseif child:IsA("Folder") or child:IsA("Model") then
+                for _, sub in ipairs(child:GetChildren()) do
+                    if sub:IsA("Model") then
+                        evaluateModel(sub, Players:GetPlayerFromCharacter(sub))
+                    end
+                end
+            end
+        end
+
+        CachedEnemies = newEnemies
+        task.wait(0.35)
     end
-end
+end)
 
 -- ==========================================
--- 4. HỆ THỐNG AIMBOT (GHIM ĐẦU ĐỊCH KHI BẮN)
+-- 3. NHẬN DIỆN NÚT BẮN SÚNG TRÊN MOBILE (TRÁI & PHẢI)
 -- ==========================================
--- Nhận diện thao tác bóp cò súng trên cả giao diện cảm ứng Mobile lẫn chuột PC
-local function checkTouchIsOnFireButton(screenPos)
-    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-    if not playerGui then return false end
+local ActiveFireTouches = {}
+local IsFiringMobile = false
 
-    local guiObjects = playerGui:GetGuiObjectsAtPosition(screenPos.X, screenPos.Y)
-    for _, obj in ipairs(guiObjects) do
-        -- Bỏ qua nếu đang chạm vào Menu hoặc Nút Nổi của script
-        if obj:IsDescendantOf(ScreenGui) then
+-- Kiểm tra tọa độ chạm có nằm vào nút bắn bên phải hoặc nút bắn bên trái như trong video hay không
+local function isTouchOnFireButton(pos)
+    if not Camera then return false end
+    local vp = Camera.ViewportSize
+
+    -- Bỏ qua nếu đang chạm vào Menu hoặc Nút Nổi đang hiển thị
+    if Config.Menu_Visible then
+        local mPos = MainFrame.AbsolutePosition
+        local mSize = MainFrame.AbsoluteSize
+        if pos.X >= mPos.X and pos.X <= mPos.X + mSize.X and pos.Y >= mPos.Y and pos.Y <= mPos.Y + mSize.Y then
             return false
         end
-        if obj:IsA("GuiButton") and obj.Visible then
-            local lowerName = string.lower(obj.Name)
-            -- Nhận diện nút bắn theo tên hoặc vị trí nút cò súng trên màn hình Mobile
-            if string.find(lowerName, "fire") or string.find(lowerName, "shoot") or string.find(lowerName, "attack") then
-                return true
-            end
-            -- Trong bố cục HUD của game, nút bắn nằm ở cụm nút điều khiển bên phải hoặc nút bắn phụ bên trái
-            local viewport = Camera.ViewportSize
-            if screenPos.X > viewport.X * 0.55 and screenPos.Y > viewport.Y * 0.35 then
-                return true
-            end
-        end
     end
+    local fPos = FloatingBtn.AbsolutePosition
+    local fSize = FloatingBtn.AbsoluteSize
+    if pos.X >= fPos.X and pos.X <= fPos.X + fSize.X and pos.Y >= fPos.Y and pos.Y <= fPos.Y + fSize.Y then
+        return false
+    end
+
+    -- 1. Vùng nút bắn chính bên phải màn hình (như bố cục nút hình viên đạn bên phải trong video)
+    if pos.X >= vp.X * 0.68 and pos.Y >= vp.Y * 0.45 then
+        return true
+    end
+
+    -- 2. Vùng nút bắn phụ bên trái màn hình (nút hình viên đạn phía trên cần di chuyển trái trong video)
+    if pos.X >= vp.X * 0.14 and pos.X <= vp.X * 0.30 and pos.Y >= vp.Y * 0.55 and pos.Y <= vp.Y * 0.85 then
+        return true
+    end
+
     return false
 end
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
+UserInputService.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch then
-        if checkTouchIsOnFireButton(input.Position) then
-            ActiveTouches[input] = true
-            IsShootingTouch = true
+        if isTouchOnFireButton(input.Position) then
+            ActiveFireTouches[input] = true
+            IsFiringMobile = true
         end
     end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
-    if ActiveTouches[input] then
-        ActiveTouches[input] = nil
-        IsShootingTouch = (next(ActiveTouches) ~= nil)
+    if ActiveFireTouches[input] then
+        ActiveFireTouches[input] = nil
+        IsFiringMobile = (next(ActiveFireTouches) ~= nil)
     end
 end)
 
-local function isPlayerFiring()
-    -- 1. Chuột trái trên PC
-    if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+local function isShootingNow()
+    if IsFiringMobile then
         return true
     end
-    -- 2. Chạm nút bắn trên màn hình cảm ứng Mobile
-    if IsShootingTouch then
+    if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
         return true
     end
     return false
 end
 
--- Tìm phần ĐẦU (Head) của kẻ địch gần tâm súng (giữa màn hình) nhất
-local function getClosestEnemyHeadToCrosshair()
-    local bestHead = nil
-    local shortestScreenDistance = math.huge
-    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+-- ==========================================
+-- 4. VÒNG LẶP CẬP NHẬT ESP 2D & AIMBOT TỨC THÌ (0MS)
+-- ==========================================
+local function getOrCreateESPLabel(char)
+    local lbl = ESPLabels[char]
+    if not lbl then
+        lbl = Instance.new("TextLabel")
+        lbl.Name = "EnemyESP"
+        lbl.Size = UDim2.new(0, 200, 0, 60)
+        lbl.AnchorPoint = Vector2.new(0.5, 1)
+        lbl.BackgroundTransparency = 1
+        lbl.TextColor3 = Color3.fromRGB(255, 55, 55)
+        lbl.TextStrokeTransparency = 0.15
+        lbl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextSize = 13
+        lbl.ZIndex = 50
+        lbl.Parent = ESPContainer
+        ESPLabels[char] = lbl
+    end
+    return lbl
+end
 
-    local targets = getPotentialTargets()
-    for _, targetData in ipairs(targets) do
-        local char = targetData.Character
-        local plr = targetData.Player
-        if char and not isTeammate(plr, char) then
-            local humanoid = char:FindFirstChildOfClass("Humanoid")
-            local head = char:FindFirstChild("Head")
+-- Sử dụng BindToRenderStep với mức ưu tiên cao hơn Camera của game để khóa tâm tức thì
+RunService:BindToRenderStep("MrDon_FastAimbot", Enum.RenderPriority.Camera.Value + 10, function()
+    Camera = Workspace.CurrentCamera
+    if not Camera then return end
 
-            if humanoid and humanoid.Health > 0 and head then
-                local screenPoint, onScreen = Camera:WorldToViewportPoint(head.Position)
-                if onScreen and screenPoint.Z > 0 then
-                    local screenPos2D = Vector2.new(screenPoint.X, screenPoint.Y)
-                    local distFromCrosshair = (screenPos2D - screenCenter).Magnitude
+    local vpCenter = Vector2.new(Camera.ViewportSize.X * 0.5, Camera.ViewportSize.Y * 0.5)
+    local closestHead = nil
+    local minScreenDist = math.huge
 
-                    if distFromCrosshair < shortestScreenDistance then
-                        shortestScreenDistance = distFromCrosshair
-                        bestHead = head
+    local anyESP = Config.ESP_Name or Config.ESP_Health or Config.ESP_Distance
+    local activeCharsThisFrame = {}
+
+    local myRootPos = Camera.CFrame.Position
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        myRootPos = LocalPlayer.Character.HumanoidRootPart.Position
+    end
+
+    for _, enemy in ipairs(CachedEnemies) do
+        local char = enemy.Character
+        local head = enemy.Head
+        local hum = enemy.Humanoid
+        local root = enemy.Root
+
+        if char and char.Parent and head and hum and hum.Health > 0 then
+            local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+
+            if onScreen and screenPos.Z > 0 then
+                local pos2D = Vector2.new(screenPos.X, screenPos.Y)
+                local distToCrosshair = (pos2D - vpCenter).Magnitude
+
+                -- Tìm đầu địch gần tâm ngắm nhất cho Aimbot
+                if distToCrosshair < minScreenDist then
+                    minScreenDist = distToCrosshair
+                    closestHead = head
+                end
+
+                -- Vẽ ESP 2D ngay phía trên đầu kẻ địch
+                if anyESP then
+                    activeCharsThisFrame[char] = true
+                    local lbl = getOrCreateESPLabel(char)
+                    lbl.Visible = true
+                    lbl.Position = UDim2.new(0, screenPos.X, 0, screenPos.Y - 18)
+
+                    local info = {}
+                    if Config.ESP_Name then
+                        table.insert(info, enemy.Name)
                     end
+                    if Config.ESP_Health then
+                        table.insert(info, string.format("Máu: %d/%d", math.floor(hum.Health), math.floor(hum.MaxHealth)))
+                    end
+                    if Config.ESP_Distance and root then
+                        local studs = math.floor((root.Position - myRootPos).Magnitude)
+                        table.insert(info, string.format("%dm", studs))
+                    end
+                    lbl.Text = table.concat(info, "\n")
                 end
             end
         end
     end
 
-    return bestHead
-end
-
--- Vòng lặp cập nhật mỗi khung hình
-local lastEspUpdate = 0
-RunService.RenderStepped:Connect(function()
-    Camera = Workspace.CurrentCamera
-    if not Camera then return end
-
-    -- Cập nhật Aimbot ngay lập tức khi bật và người chơi đang bắn
-    if Config.Aimbot_Enabled and isPlayerFiring() then
-        local targetHead = getClosestEnemyHeadToCrosshair()
-        if targetHead then
-            Camera.CFrame = CFrame.new(Camera.CFrame.Position, targetHead.Position)
+    -- Ẩn các nhãn ESP của mục tiêu đã khuất màn hình hoặc đã bị hạ gục
+    for char, lbl in pairs(ESPLabels) do
+        if not activeCharsThisFrame[char] then
+            if not char or not char.Parent then
+                lbl:Destroy()
+                ESPLabels[char] = nil
+            else
+                lbl.Visible = false
+            end
         end
     end
 
-    -- Cập nhật ESP định kỳ (mỗi 0.1 giây để tối ưu FPS trên điện thoại)
-    local now = tick()
-    if now - lastEspUpdate >= 0.1 then
-        lastEspUpdate = now
-        local targets = getPotentialTargets()
-        for _, targetData in ipairs(targets) do
-            updateCharacterESP(targetData
+    -- Khóa thẳng CFrame của Camera vào chính giữa phần ĐẦU (Head) tức thì khi bắn
+    if Config.Aimbot_Enabled and isShootingNow() and closestHead then
+        Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, closestHead.Position)
+    end
+end)
