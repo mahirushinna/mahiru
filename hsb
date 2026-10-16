@@ -1,15 +1,19 @@
 --!strict
 --[[
-	Tactical HUD & Strict Fire-Only Aim System v3.0 (Roblox Studio LocalScript)
+	Tactical HUD & On-Fire Sticky Aim-Assist System v3.0 (Roblox Studio LocalScript)
 	Vị trí đặt: StarterPlayer -> StarterPlayerScripts
-	Các khắc phục trong bản v3.0:
-	1. ESP quét ổn định 100%, tự động lọc bỏ đồng đội và các đối tượng không hợp lệ.
-	2. AIM tuyệt đối chỉ kích hoạt khi người chơi thực sự nhấn giữ nút bắn, hoàn toàn không tự bắt tâm khi buông tay.
-	3. Vòng tròn FOV và đường kẻ ESP Aim hoạt động mượt mà theo thời gian thực.
+	Khắc phục triệt để:
+	1. ESP hiển thị đầy đủ 100% kẻ địch (bỏ quét TextLabel 2D của Killfeed gây mất ESP;
+	   chỉ lọc đồng đội dựa trên BillboardGui/Highlight 3D màu xanh gắn trực tiếp trên nhân vật).
+	2. Aim CHỈ bắt tâm khi ngón tay nhấn trực tiếp vào Nút Bắn (TouchStarted trên nút bắn)
+	   hoặc giữ Chuột Trái trên PC; xoay camera hay di chuyển hoàn toàn không tự kéo tâm.
+	3. Giữ nguyên: Nút nổi vuông, Menu vuông 2 phần, Bộ đếm + Dây kẻ từ bộ đếm,
+	   Vòng tròn ESP Aim + Dây báo mục tiêu từ tâm ngắm, và Thanh kéo vùng Aim 40° - 360°.
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local Teams = game:GetService("Teams")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
@@ -18,21 +22,21 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local Camera = Workspace.CurrentCamera
 
 -- ============================================================================
--- 1. CẤU HÌNH & TRẠNG THÁI HỆ THỐNG
+-- 1. CẤU HÌNH & TRẠNG THÁI (STATE MANAGEMENT)
 -- ============================================================================
 local State = {
 	MenuOpen = true,
 
-	-- Cấu hình Phần 1: ESP
+	-- Phần 1: ESP
 	ESP_Box2D = false,
 	ESP_Health = false,
 	ESP_Distance = false,
 	ESP_Name = false,
 	ESP_Tracer = false,
 
-	-- Cấu hình Phần 2: AIM & FOV
+	-- Phần 2: AIM
 	Aim_Enabled = false,
-	Aim_ESPEnabled = false,
+	Aim_ESPEnabled = false,    -- Vòng tròn Aim + Đường kẻ báo mục tiêu từ tâm ngắm
 	Aim_TargetPart = "Head",   -- "Head" | "Torso" | "None"
 	Aim_Degree = 90,           -- Góc điều chỉnh từ 40° đến 360°
 }
@@ -48,8 +52,11 @@ type ESPVisuals = {
 }
 
 local ESPCache: { [Player]: ESPVisuals } = {}
-local IsFiringActive = false -- Cờ hiệu trạng thái nhấn giữ nút bắn thực tế
+local ActiveFireTouches: { [InputObject]: boolean } = {}
+local MouseFireHeld = false
+local CurrentLockedTargetPart: BasePart? = nil
 
+-- Tính bán kính vòng tròn Aim (pixel) từ độ Aim (40° -> 360°)
 local function getFOVRadiusPixels(): number
 	Camera = Workspace.CurrentCamera
 	local vp = Camera and Camera.ViewportSize or Vector2.new(1280, 720)
@@ -61,17 +68,101 @@ local function getFOVRadiusPixels(): number
 end
 
 -- ============================================================================
--- 2. HỆ THỐNG LỌC ĐỒNG ĐỘI & KẺ ĐỊCH CHUẨN XÁC
+-- 2. NHẬN DIỆN KẺ ĐỊCH & LỌC ĐỒNG ĐỘI CHUẨN XÁC (KHÔNG BỎ SÓT NGƯỜI)
 -- ============================================================================
+-- Kiểm tra màu xanh nước biển / xanh dương (Cyan / Sky Blue) của thẻ tên đồng đội trên đầu
 local function isTeammateCyanBlue(color: Color3): boolean
 	local h, s, v = color:ToHSV()
-	if h >= 0.46 and h <= 0.68 and s >= 0.35 and v >= 0.45 then
+	if h >= 0.47 and h <= 0.67 and s >= 0.40 and v >= 0.50 then
 		return true
 	end
-	if color.B >= 0.55 and color.G >= 0.40 and color.R <= 0.45 then
+	if color.B >= 0.60 and color.G >= 0.45 and color.R <= 0.38 then
 		return true
 	end
 	return false
+end
+
+-- Kiểm tra màu đỏ của viền kẻ địch (Red Highlight)
+local function isEnemyRedColor(color: Color3): boolean
+	return color.R >= 0.65 and color.G <= 0.35 and color.B <= 0.35
+end
+
+-- Kiểm tra xem game có thực sự chia thành nhiều Team khác nhau hay không
+local function hasDistinctTeams(): boolean
+	local teamList = Teams:GetTeams()
+	if #teamList < 2 then
+		return false
+	end
+	local firstTeam: Team? = nil
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Team ~= nil then
+			if firstTeam == nil then
+				firstTeam = p.Team
+			elseif p.Team ~= firstTeam then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- Kiểm tra một BillboardGui hoặc Highlight gắn trực tiếp vào Character của mục tiêu
+local function check3DCharacterIndicators(character: Model): (boolean, boolean)
+	local hasEnemyRed = false
+	local hasTeammateCyan = false
+
+	-- 1. Quét các thành phần 3D nằm trực tiếp bên trong Character
+	for _, desc in ipairs(character:GetDescendants()) do
+		if desc:IsA("Highlight") and desc.Enabled then
+			if isEnemyRedColor(desc.OutlineColor) or isEnemyRedColor(desc.FillColor) then
+				hasEnemyRed = true
+			elseif isTeammateCyanBlue(desc.OutlineColor) or isTeammateCyanBlue(desc.FillColor) then
+				hasTeammateCyan = true
+			end
+		elseif desc:IsA("BillboardGui") and desc.Enabled then
+			for _, sub in ipairs(desc:GetDescendants()) do
+				if (sub:IsA("TextLabel") or sub:IsA("TextBox")) and sub.Visible then
+					if isTeammateCyanBlue(sub.TextColor3) or isTeammateCyanBlue(sub.TextStrokeColor3) then
+						hasTeammateCyan = true
+					elseif isEnemyRedColor(sub.TextColor3) then
+						hasEnemyRed = true
+					end
+				elseif sub:IsA("ImageLabel") and sub.Visible then
+					if isTeammateCyanBlue(sub.ImageColor3) then
+						hasTeammateCyan = true
+					end
+				end
+			end
+		end
+	end
+
+	-- 2. Quét các BillboardGui/Highlight đặt trong PlayerGui nhưng có Adornee gắn vào Character này
+	if not hasEnemyRed and not hasTeammateCyan then
+		for _, guiObj in ipairs(PlayerGui:GetDescendants()) do
+			if guiObj:IsA("BillboardGui") and guiObj.Enabled and guiObj.Adornee then
+				if guiObj.Adornee == character or guiObj.Adornee:IsDescendantOf(character) then
+					for _, sub in ipairs(guiObj:GetDescendants()) do
+						if (sub:IsA("TextLabel") or sub:IsA("TextBox")) and sub.Visible then
+							if isTeammateCyanBlue(sub.TextColor3) or isTeammateCyanBlue(sub.TextStrokeColor3) then
+								hasTeammateCyan = true
+								break
+							end
+						end
+					end
+				end
+			elseif guiObj:IsA("Highlight") and guiObj.Enabled and guiObj.Adornee then
+				if guiObj.Adornee == character or guiObj.Adornee:IsDescendantOf(character) then
+					if isEnemyRedColor(guiObj.OutlineColor) or isEnemyRedColor(guiObj.FillColor) then
+						hasEnemyRed = true
+					elseif isTeammateCyanBlue(guiObj.OutlineColor) or isTeammateCyanBlue(guiObj.FillColor) then
+						hasTeammateCyan = true
+					end
+				end
+			end
+		end
+	end
+
+	return hasEnemyRed, hasTeammateCyan
 end
 
 local function isEnemy(player: Player): boolean
@@ -79,35 +170,93 @@ local function isEnemy(player: Player): boolean
 		return false
 	end
 
-	-- Kiểm tra Team chuẩn của Roblox
-	if LocalPlayer.Team ~= nil and player.Team ~= nil then
-		if player.Team == LocalPlayer.Team then
-			return false
-		end
-	end
-
 	local character = player.Character
 	if not character then
 		return false
 	end
 
-	-- Kiểm tra nhãn tên đồng đội màu xanh nước biển trên đầu nhân vật
-	for _, desc in ipairs(character:GetDescendants()) do
-		if desc:IsA("TextLabel") or desc:IsA("TextBox") then
-			local billboard = desc:FindFirstAncestorOfClass("BillboardGui")
-			if (not billboard or billboard.Enabled) and desc.Visible then
-				if isTeammateCyanBlue(desc.TextColor3) or isTeammateCyanBlue(desc.TextStrokeColor3) then
-					return false
-				end
-			end
+	-- Kiểm tra chỉ báo 3D trực tiếp trên nhân vật (Viền đỏ = Địch, Chữ xanh trên đầu = Đồng đội)
+	local hasEnemyRed, hasTeammateCyan = check3DCharacterIndicators(character)
+	if hasEnemyRed then
+		return true
+	end
+	if hasTeammateCyan then
+		return false
+	end
+
+	-- Kiểm tra Team chuẩn của Roblox (chỉ áp dụng khi các người chơi thực sự ở các Team khác nhau)
+	if LocalPlayer.Team ~= nil and player.Team ~= nil and hasDistinctTeams() then
+		if player.Team == LocalPlayer.Team then
+			return false
 		end
+	end
+
+	-- Kiểm tra Attribute Team nếu có
+	local myTeamAttr = LocalPlayer:GetAttribute("Team") or LocalPlayer:GetAttribute("TeamId")
+	local theirTeamAttr = player:GetAttribute("Team") or player:GetAttribute("TeamId")
+	if myTeamAttr ~= nil and theirTeamAttr ~= nil and myTeamAttr == theirTeamAttr then
+		return false
 	end
 
 	return true
 end
 
+-- Lấy đầy đủ các bộ phận của nhân vật với cơ chế dự phòng (tránh bỏ sót người khi rig khác nhau)
+local function getCharacterParts(character: Model): (BasePart?, BasePart?, BasePart?, Humanoid?)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = (
+		character:FindFirstChild("HumanoidRootPart")
+		or character.PrimaryPart
+		or character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChildWhichIsA("BasePart")
+	) :: BasePart?
+
+	local headPart = (
+		character:FindFirstChild("Head")
+		or character:FindFirstChild("FakeHead")
+		or rootPart
+	) :: BasePart?
+
+	local torsoPart = (
+		character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChild("LowerTorso")
+		or rootPart
+	) :: BasePart?
+
+	return rootPart, headPart, torsoPart, humanoid
+end
+
+local function isCharacterAlive(character: Model, humanoid: Humanoid?, rootPart: BasePart?): boolean
+	if not rootPart or not character.Parent then
+		return false
+	end
+	if humanoid then
+		if humanoid.Health <= 0 or humanoid:GetState() == Enum.HumanoidStateType.Dead then
+			return false
+		end
+		return true
+	end
+	local hpAttr = character:GetAttribute("Health") or character:GetAttribute("HP")
+	if type(hpAttr) == "number" then
+		return hpAttr > 0
+	end
+	return true
+end
+
+local function getAimPartFromCharacter(character: Model, mode: string): BasePart?
+	local rootPart, headPart, torsoPart = getCharacterParts(character)
+	if mode == "Head" then
+		return headPart or rootPart
+	elseif mode == "Torso" then
+		return torsoPart or rootPart
+	end
+	return nil
+end
+
 -- ============================================================================
--- 3. GIAO DIỆN (NÚT NỔI, MENU VUÔNG, VÒNG AIM, ĐƯỜNG KẺ & BỘ ĐẾM)
+-- 3. KHỞI TẠO GIAO DIỆN (VÒNG AIM, DÂY AIM, BỘ ĐẾM, NÚT NỔI & MENU VUÔNG)
 -- ============================================================================
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "TacticalDebugHUD_V3"
@@ -120,7 +269,7 @@ local OverlayFolder = Instance.new("Folder")
 OverlayFolder.Name = "ESPOverlay"
 OverlayFolder.Parent = ScreenGui
 
--- Vòng tròn Aim (FOV Circle) quanh tâm ngắm
+-- VÒNG TRÒN AIM (FOV CIRCLE) QUANH TÂM NGẮM
 local FOVCircle = Instance.new("Frame")
 FOVCircle.Name = "AimFOVCircle"
 FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -140,7 +289,7 @@ FOVStroke.Thickness = 1.6
 FOVStroke.Transparency = 0.15
 FOVStroke.Parent = FOVCircle
 
--- Đường kẻ ESP Aim từ tâm ngắm đến mục tiêu gần nhất trong vòng tròn
+-- ĐƯỜNG KẺ ESP AIM (Từ tâm ngắm nối đến mục tiêu gần nhất trong vòng tròn)
 local AimTargetLine = Instance.new("Frame")
 AimTargetLine.Name = "AimTargetSnapline"
 AimTargetLine.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -150,7 +299,7 @@ AimTargetLine.Visible = false
 AimTargetLine.ZIndex = 5
 AimTargetLine.Parent = ScreenGui
 
--- Bộ đếm số người chơi được định vị (Dưới bảng điểm)
+-- BỘ ĐẾM NGƯỜI CHƠI ĐƯỢC ĐỊNH VỊ (Dưới bảng điểm)
 local CounterBadge = Instance.new("Frame")
 CounterBadge.Name = "TargetCounterBadge"
 CounterBadge.AnchorPoint = Vector2.new(0.5, 0)
@@ -179,7 +328,7 @@ CounterLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
 CounterLabel.TextSize = 15
 CounterLabel.Parent = CounterBadge
 
--- Nút nổi mở Menu
+-- NÚT NỔI HÌNH VUÔNG ĐỂ ĐÓNG/MỞ MENU
 local FloatingBtn = Instance.new("TextButton")
 FloatingBtn.Name = "FloatingToggleButton"
 FloatingBtn.Size = UDim2.fromOffset(50, 50)
@@ -232,7 +381,7 @@ do
 	end)
 end
 
--- Menu hình vuông chính
+-- MENU CHÍNH HÌNH VUÔNG (350 x 350)
 local MainMenu = Instance.new("Frame")
 MainMenu.Name = "MainSquareMenu"
 MainMenu.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -256,9 +405,9 @@ local TitleBar = Instance.new("TextLabel")
 TitleBar.Size = UDim2.new(1, 0, 0, 34)
 TitleBar.BackgroundColor3 = Color3.fromRGB(26, 30, 40)
 TitleBar.Font = Enum.Font.GothamBold
-TitleBar.Text = "TACTICAL MENU v3 (FIXED AIM & ESP)"
+TitleBar.Text = "TACTICAL MENU v3 (ESP & AIM KHI BẮN)"
 TitleBar.TextColor3 = Color3.fromRGB(235, 240, 255)
-TitleBar.TextSize = 12
+TitleBar.TextSize = 13
 TitleBar.Parent = MainMenu
 
 local TitleCorner = Instance.new("UICorner")
@@ -293,7 +442,7 @@ local function createSectionPanel(title: string, posScaleX: number): Frame
 	header.Font = Enum.Font.GothamBold
 	header.Text = title
 	header.TextColor3 = Color3.fromRGB(0, 200, 255)
-	header.TextSize = 11
+	header.TextSize = 12
 	header.Parent = panel
 
 	local container = Instance.new("Frame")
@@ -304,19 +453,19 @@ local function createSectionPanel(title: string, posScaleX: number): Frame
 	container.Parent = panel
 
 	local layout = Instance.new("UIListLayout")
-	layout.Padding = UDim.new(0, 5)
+	layout.Padding = UDim.new(0, 6)
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.Parent = container
 
 	return container
 end
 
-local ESPList = createSectionPanel("PHẦN 1: ESP", 0)
-local AimList = createSectionPanel("PHẦN 2: AIM", 0.515)
+local ESPList = createSectionPanel("PHẦN 1: ESP (100% ĐỊCH)", 0)
+local AimList = createSectionPanel("PHẦN 2: AIM KHI BẮN", 0.515)
 
 local function createToggleButton(parent: Frame, labelText: string, initialValue: boolean, onToggle: (boolean) -> ()): (TextButton, (boolean) -> ())
 	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(1, 0, 0, 34)
+	btn.Size = UDim2.new(1, 0, 0, 36)
 	btn.Font = Enum.Font.GothamMedium
 	btn.TextSize = 11
 	btn.TextWrapped = true
@@ -352,16 +501,39 @@ local function createToggleButton(parent: Frame, labelText: string, initialValue
 	return btn, updateVisual
 end
 
--- Phần 1: ESP toggles
-createToggleButton(ESPList, "ESP Hộp 2D", State.ESP_Box2D, function(val) State.ESP_Box2D = val end)
-createToggleButton(ESPList, "Định vị Máu", State.ESP_Health, function(val) State.ESP_Health = val end)
-createToggleButton(ESPList, "Định vị K.Cách", State.ESP_Distance, function(val) State.ESP_Distance = val end)
-createToggleButton(ESPList, "Định vị Tên", State.ESP_Name, function(val) State.ESP_Name = val end)
-createToggleButton(ESPList, "Dây Kẻ (Tracer)", State.ESP_Tracer, function(val) State.ESP_Tracer = val end)
+-- Phần 1: Các nút ESP
+createToggleButton(ESPList, "ESP Hộp 2D", State.ESP_Box2D, function(val)
+	State.ESP_Box2D = val
+end)
 
--- Phần 2: Aim toggles
-createToggleButton(AimList, "Chức năng Aim", State.Aim_Enabled, function(val) State.Aim_Enabled = val end)
-createToggleButton(AimList, "ESP Aim (Vòng+Dây)", State.Aim_ESPEnabled, function(val) State.Aim_ESPEnabled = val end)
+createToggleButton(ESPList, "Định vị Máu", State.ESP_Health, function(val)
+	State.ESP_Health = val
+end)
+
+createToggleButton(ESPList, "Định vị K.Cách", State.ESP_Distance, function(val)
+	State.ESP_Distance = val
+end)
+
+createToggleButton(ESPList, "Định vị Tên", State.ESP_Name, function(val)
+	State.ESP_Name = val
+end)
+
+createToggleButton(ESPList, "Dây Kẻ (Tracer)", State.ESP_Tracer, function(val)
+	State.ESP_Tracer = val
+end)
+
+-- Phần 2: Các nút AIM & ESP AIM
+createToggleButton(AimList, "Chức năng Aim", State.Aim_Enabled, function(val)
+	State.Aim_Enabled = val
+	if not val then
+		table.clear(ActiveFireTouches)
+		MouseFireHeld = false
+	end
+end)
+
+createToggleButton(AimList, "ESP Aim (Vòng+Dây)", State.Aim_ESPEnabled, function(val)
+	State.Aim_ESPEnabled = val
+end)
 
 local setHeadVisual: (boolean) -> ()
 local setTorsoVisual: (boolean) -> ()
@@ -369,24 +541,32 @@ local setTorsoVisual: (boolean) -> ()
 _, setHeadVisual = createToggleButton(AimList, "Vị trí: Đầu", State.Aim_TargetPart == "Head", function(val)
 	if val then
 		State.Aim_TargetPart = "Head"
-		if setTorsoVisual then setTorsoVisual(false) end
+		if setTorsoVisual then
+			setTorsoVisual(false)
+		end
 	else
-		if State.Aim_TargetPart == "Head" then State.Aim_TargetPart = "None" end
+		if State.Aim_TargetPart == "Head" then
+			State.Aim_TargetPart = "None"
+		end
 	end
 end)
 
 _, setTorsoVisual = createToggleButton(AimList, "Vị trí: Thân", State.Aim_TargetPart == "Torso", function(val)
 	if val then
 		State.Aim_TargetPart = "Torso"
-		if setHeadVisual then setHeadVisual(false) end
+		if setHeadVisual then
+			setHeadVisual(false)
+		end
 	else
-		if State.Aim_TargetPart == "Torso" then State.Aim_TargetPart = "None" end
+		if State.Aim_TargetPart == "Torso" then
+			State.Aim_TargetPart = "None"
+		end
 	end
 end)
 
--- Thanh trượt chỉnh góc Aim từ 40° đến 360°
+-- THANH KÉO (SLIDER) CHỈNH ĐỘ AIM TỪ 40° ĐẾN 360°
 local SliderFrame = Instance.new("Frame")
-SliderFrame.Size = UDim2.new(1, 0, 0, 50)
+SliderFrame.Size = UDim2.new(1, 0, 0, 54)
 SliderFrame.BackgroundColor3 = Color3.fromRGB(34, 38, 48)
 SliderFrame.Parent = AimList
 
@@ -396,7 +576,7 @@ SliderCorner.Parent = SliderFrame
 
 local SliderTitle = Instance.new("TextLabel")
 SliderTitle.Position = UDim2.fromOffset(6, 4)
-SliderTitle.Size = UDim2.new(1, -12, 0, 16)
+SliderTitle.Size = UDim2.new(1, -12, 0, 18)
 SliderTitle.BackgroundTransparency = 1
 SliderTitle.Font = Enum.Font.GothamBold
 SliderTitle.Text = string.format("Vùng Aim: %d°", State.Aim_Degree)
@@ -405,7 +585,7 @@ SliderTitle.TextSize = 11
 SliderTitle.Parent = SliderFrame
 
 local SliderTrack = Instance.new("Frame")
-SliderTrack.Position = UDim2.new(0.08, 0, 0, 28)
+SliderTrack.Position = UDim2.new(0.08, 0, 0, 32)
 SliderTrack.Size = UDim2.new(0.84, 0, 0, 10)
 SliderTrack.BackgroundColor3 = Color3.fromRGB(18, 20, 25)
 SliderTrack.Parent = SliderFrame
@@ -427,7 +607,7 @@ FillCorner.Parent = SliderFill
 local SliderKnob = Instance.new("Frame")
 SliderKnob.AnchorPoint = Vector2.new(0.5, 0.5)
 SliderKnob.Position = UDim2.fromScale(initialRatio, 0.5)
-SliderKnob.Size = UDim2.fromOffset(14, 14)
+SliderKnob.Size = UDim2.fromOffset(16, 16)
 SliderKnob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 SliderKnob.Parent = SliderTrack
 
@@ -437,6 +617,7 @@ KnobCorner.Parent = SliderKnob
 
 do
 	local sliding = false
+
 	local function updateSliderFromX(screenX: number)
 		local trackPos = SliderTrack.AbsolutePosition.X
 		local trackWidth = math.max(SliderTrack.AbsoluteSize.X, 1)
@@ -470,76 +651,147 @@ do
 end
 
 -- ============================================================================
--- 4. HỆ THỐNG PHÁT HIỆN NÚT BẮN THỰC TẾ (CHỈ BẮT KHI NGƯỜI DÂN CHẠM NÚT BẮN)
+-- 4. NHẬN DIỆN CHÍNH XÁC NÚT BẮN (CHỈ KHI NHẤN NÚT BẮN MỚI BẮT TÂM)
 -- ============================================================================
--- Theo dõi chính xác mọi nút bấm trên màn hình di động hoặc PC
-local ActiveTouchesCount = 0
+-- Kiểm tra xem tọa độ điểm BẮT ĐẦU CHẠM (TouchStarted) có nằm đúng trong Nút Bắn hay không
+local function isPointInsideFireButton(screenPoint: Vector2): boolean
+	-- Không kích hoạt nếu người chơi đang bấm vào Menu hoặc Nút nổi của chính script
+	if State.MenuOpen then
+		local mPos = MainMenu.AbsolutePosition
+		local mSize = MainMenu.AbsoluteSize
+		if screenPoint.X >= mPos.X and screenPoint.X <= mPos.X + mSize.X
+			and screenPoint.Y >= mPos.Y and screenPoint.Y <= mPos.Y + mSize.Y then
+			return false
+		end
+	end
 
+	local fPos = FloatingBtn.AbsolutePosition
+	local fSize = FloatingBtn.AbsoluteSize
+	if screenPoint.X >= fPos.X and screenPoint.X <= fPos.X + fSize.X
+		and screenPoint.Y >= fPos.Y and screenPoint.Y <= fPos.Y + fSize.Y then
+		return false
+	end
+
+	Camera = Workspace.CurrentCamera
+	local vp = Camera and Camera.ViewportSize or Vector2.new(1280, 720)
+
+	-- 1. Kiểm tra các GuiButton / ImageButton thực tế trong PlayerGui có tên hoặc vị trí là Nút Bắn
+	for _, desc in ipairs(PlayerGui:GetDescendants()) do
+		if (desc:IsA("GuiButton") or (desc:IsA("GuiObject") and desc.Active))
+			and desc.Visible
+			and not desc:IsDescendantOf(ScreenGui)
+		then
+			local size = desc.AbsoluteSize
+			if size.X >= 34 and size.X <= 165 and size.Y >= 34 and size.Y <= 165 then
+				local pos = desc.AbsolutePosition
+				local center = pos + size * 0.5
+				local normX = center.X / math.max(vp.X, 1)
+				local normY = center.Y / math.max(vp.Y, 1)
+
+				local lowerName = string.lower(desc.Name)
+				local isFireNamed = (string.find(lowerName, "fire", 1, true) ~= nil)
+					or (string.find(lowerName, "shoot", 1, true) ~= nil)
+
+				-- Vị trí nút bắn phải (X ~ 83.2%, Y ~ 62.5%) và nút bắn trái (X ~ 4.5%, Y ~ 50.5%) trong video
+				local isRightFireSlot = (math.abs(normX - 0.832) <= 0.055 and math.abs(normY - 0.625) <= 0.075)
+				local isLeftFireSlot = (math.abs(normX - 0.045) <= 0.040 and math.abs(normY - 0.505) <= 0.065)
+
+				if isFireNamed or isRightFireSlot or isLeftFireSlot then
+					local radius = math.max(size.X, size.Y) * 0.52
+					if (screenPoint - center).Magnitude <= radius then
+						return true
+					end
+				end
+			end
+		end
+	end
+
+	-- 2. Kiểm tra tọa độ hình tròn chuẩn của Nút Bắn Phải và Nút Bắn Trái trên HUD Mobile
+	local rightFireCenter = Vector2.new(vp.X * 0.832, vp.Y * 0.625)
+	local leftFireCenter = Vector2.new(vp.X * 0.045, vp.Y * 0.505)
+	local rightRadius = math.min(vp.X, vp.Y) * 0.068
+	local leftRadius = math.min(vp.X, vp.Y) * 0.052
+
+	if (screenPoint - rightFireCenter).Magnitude <= rightRadius then
+		return true
+	end
+	if (screenPoint - leftFireCenter).Magnitude <= leftRadius then
+		return true
+	end
+
+	return false
+end
+
+-- Trên thiết bị cảm ứng: CHỈ ghi nhận khi ngón tay BẮT ĐẦU CHẠM (TouchStarted) ngay trong Nút Bắn.
+-- Nếu người chơi chạm ngoài nút bắn để xoay camera rồi lướt ngón tay ngang qua nút bắn, hệ thống sẽ BỎ QUA.
+UserInputService.TouchStarted:Connect(function(touchInput: InputObject, _gameProcessed: boolean)
+	local startPos = Vector2.new(touchInput.Position.X, touchInput.Position.Y)
+	if isPointInsideFireButton(startPos) then
+		ActiveFireTouches[touchInput] = true
+	end
+end)
+
+UserInputService.TouchEnded:Connect(function(touchInput: InputObject, _gameProcessed: boolean)
+	ActiveFireTouches[touchInput] = nil
+end)
+
+-- Trên PC (Không phải màn hình cảm ứng): chỉ nhận Chuột Trái khi không bấm vào Menu
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		IsFiringActive = true
-	elseif input.UserInputType == Enum.UserInputType.Touch then
-		Camera = Workspace.CurrentCamera
-		local vp = Camera and Camera.ViewportSize or Vector2.new(1280, 720)
-		local tPos = Vector2.new(input.Position.X, input.Position.Y)
-
-		-- Vùng nút bắn phải và nút bắn trái dựa trên layout trong video
-		local rightFireCenter = Vector2.new(vp.X * 0.835, vp.Y * 0.625)
-		local leftFireCenter = Vector2.new(vp.X * 0.045, vp.Y * 0.505)
-
-		if (tPos - rightFireCenter).Magnitude <= 70 or (tPos - leftFireCenter).Magnitude <= 60 then
-			ActiveTouchesCount += 1
-			IsFiringActive = true
+	if not UserInputService.TouchEnabled then
+		if input.UserInputType == Enum.UserInputType.MouseButton1 and not gameProcessed and not State.MenuOpen then
+			MouseFireHeld = true
 		end
 	end
 end)
 
 UserInputService.InputEnded:Connect(function(input: InputObject)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		IsFiringActive = false
+		MouseFireHeld = false
 	elseif input.UserInputType == Enum.UserInputType.Touch then
-		Camera = Workspace.CurrentCamera
-		local vp = Camera and Camera.ViewportSize or Vector2.new(1280, 720)
-		local tPos = Vector2.new(input.Position.X, input.Position.Y)
-		local rightFireCenter = Vector2.new(vp.X * 0.835, vp.Y * 0.625)
-		local leftFireCenter = Vector2.new(vp.X * 0.045, vp.Y * 0.505)
-
-		if (tPos - rightFireCenter).Magnitude <= 70 or (tPos - leftFireCenter).Magnitude <= 60 then
-			ActiveTouchesCount = math.max(0, ActiveTouchesCount - 1)
-			if ActiveTouchesCount == 0 then
-				IsFiringActive = false
-			end
-		end
+		ActiveFireTouches[input] = nil
 	end
 end)
 
--- Quét thêm các GuiButton có tên liên quan đến bắn/shoot trong game
-for _, desc in ipairs(PlayerGui:GetDescendants()) do
-	if desc:IsA("GuiButton") and not desc:IsDescendantOf(ScreenGui) then
-		local lowerName = string.lower(desc.Name)
-		if string.find(lowerName, "fire", 1, true) or string.find(lowerName, "shoot", 1, true) or string.find(lowerName, "attack", 1, true) then
-			desc.MouseButton1Down:Connect(function() IsFiringActive = true end)
-			desc.MouseButton1Up:Connect(function() IsFiringActive = false end)
-			desc.TouchStarted:Connect(function() IsFiringActive = true end)
-			desc.TouchEnded:Connect(function() IsFiringActive = false end)
+-- Kiểm tra và dọn dẹp trạng thái nút bắn mỗi khung hình (đảm bảo nhả tay là ngừng Aim ngay lập tức)
+local function isActivelyFiring(): boolean
+	-- Kiểm tra nhân vật của người chơi còn sống không
+	local myChar = LocalPlayer.Character
+	local _, _, _, myHum = if myChar then getCharacterParts(myChar) else nil, nil, nil, nil
+	if not myChar or (myHum and myHum.Health <= 0) then
+		table.clear(ActiveFireTouches)
+		MouseFireHeld = false
+		return false
+	end
+
+	-- Xác thực từng ngón tay đang giữ nút bắn; xóa ngay nếu ngón tay đã nhấc lên
+	local hasActiveTouch = false
+	for touchInput in pairs(ActiveFireTouches) do
+		local st = touchInput.UserInputState
+		if st == Enum.UserInputState.End or st == Enum.UserInputState.Cancel then
+			ActiveFireTouches[touchInput] = nil
+		else
+			hasActiveTouch = true
 		end
 	end
-end
 
--- ============================================================================
--- 5. HÀM TÌM MỤC TIÊU & VẼ ĐƯỜNG NỐI 2D
--- ============================================================================
-local function getTargetPart(character: Model, mode: string): BasePart?
-	if mode == "Head" then
-		return character:FindFirstChild("Head") :: BasePart?
-	elseif mode == "Torso" then
-		return (character:FindFirstChild("UpperTorso")
-			or character:FindFirstChild("Torso")
-			or character:FindFirstChild("HumanoidRootPart")) :: BasePart?
+	if hasActiveTouch then
+		return true
 	end
-	return nil
+
+	if not UserInputService.TouchEnabled and MouseFireHeld then
+		if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+			return true
+		else
+			MouseFireHeld = false
+		end
+	end
+
+	return false
 end
 
+-- ============================================================================
+-- 5. TÌM MỤC TIÊU TRONG VÒNG AIM & VẼ ĐƯỜNG THẲNG 2D
+-- ============================================================================
 local function drawLine2D(lineFrame: Frame, fromPos: Vector2, toPos: Vector2)
 	local delta = toPos - fromPos
 	local distance = delta.Magnitude
@@ -553,10 +805,14 @@ end
 
 local function findClosestEnemyInFOVCircle(): (BasePart?, Vector2?)
 	local partMode = State.Aim_TargetPart
-	if partMode == "None" then partMode = "Head" end
+	if partMode == "None" then
+		partMode = "Head"
+	end
 
 	Camera = Workspace.CurrentCamera
-	if not Camera then return nil, nil end
+	if not Camera then
+		return nil, nil
+	end
 
 	local viewportCenter = Camera.ViewportSize * 0.5
 	local maxRadius = getFOVRadiusPixels()
@@ -566,10 +822,10 @@ local function findClosestEnemyInFOVCircle(): (BasePart?, Vector2?)
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		if isEnemy(player) and player.Character then
-			local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-			local targetPart = getTargetPart(player.Character, partMode)
+			local rootPart, _, _, humanoid = getCharacterParts(player.Character)
+			local targetPart = getAimPartFromCharacter(player.Character, partMode)
 
-			if humanoid and humanoid.Health > 0 and targetPart then
+			if isCharacterAlive(player.Character, humanoid, rootPart) and targetPart then
 				local screenPoint, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
 				if onScreen and screenPoint.Z > 0 then
 					local screenVec = Vector2.new(screenPoint.X, screenPoint.Y)
@@ -588,7 +844,7 @@ local function findClosestEnemyInFOVCircle(): (BasePart?, Vector2?)
 end
 
 -- ============================================================================
--- 6. KHỞI TẠO ESP VISUALS CHO TỪNG PLAYER
+-- 6. KHỞI TẠO CÁC PHẦN TỬ VẼ ESP 2D CHO TỪNG NGƯỜI CHƠI
 -- ============================================================================
 local function createESPVisuals(player: Player): ESPVisuals
 	local container = Instance.new("Frame")
@@ -623,6 +879,7 @@ local function createESPVisuals(player: Player): ESPVisuals
 	healthBarFill.Parent = healthBarBg
 
 	local infoLabel = Instance.new("TextLabel")
+	infoLabel.Name = "TacticalInfoLabel"
 	infoLabel.AnchorPoint = Vector2.new(0.5, 1)
 	infoLabel.Size = UDim2.fromOffset(200, 18)
 	infoLabel.BackgroundTransparency = 1
@@ -654,7 +911,7 @@ local function createESPVisuals(player: Player): ESPVisuals
 	return visuals
 end
 
-Players.PlayerRemoving:Connect(function(player)
+Players.PlayerRemoving:Connect(function(player: Player)
 	local visuals = ESPCache[player]
 	if visuals then
 		visuals.Container:Destroy()
@@ -663,17 +920,21 @@ Players.PlayerRemoving:Connect(function(player)
 end)
 
 -- ============================================================================
--- 7. VÒNG LẶP XỬ LÝ CHÍNH (RENDERSTEP)
+-- 7. VÒNG LẶP AIM KHI BẮN & VÒNG LẶP VẼ ESP 2D
 -- ============================================================================
-RunService:BindToRenderStep("TacticalEngineCore", Enum.RenderPriority.Camera.Value + 1, function()
+RunService:BindToRenderStep("TacticalStickyAimV3", Enum.RenderPriority.Camera.Value + 1, function()
 	Camera = Workspace.CurrentCamera
-	if not Camera then return end
+	if not Camera then
+		return
+	end
 
 	local targetPart, targetScreenPos = findClosestEnemyInFOVCircle()
+	CurrentLockedTargetPart = targetPart
+
+	-- Vẽ Vòng tròn Aim & Đường kẻ ESP Aim từ tâm ngắm
 	local viewportCenter = Camera.ViewportSize * 0.5
 	local radiusPx = getFOVRadiusPixels()
 
-	-- Cập nhật hiển thị Vòng tròn Aim và Đường kẻ báo mục tiêu
 	if State.Aim_ESPEnabled then
 		FOVCircle.Position = UDim2.fromOffset(viewportCenter.X, viewportCenter.Y)
 		FOVCircle.Size = UDim2.fromOffset(radiusPx * 2, radiusPx * 2)
@@ -690,18 +951,29 @@ RunService:BindToRenderStep("TacticalEngineCore", Enum.RenderPriority.Camera.Val
 		AimTargetLine.Visible = false
 	end
 
-	-- CHỈ AIM KHI ĐANG BẬT AIM VÀ THỰC SỰ NHẤN GIỮ NÚT BẮN
-	if State.Aim_Enabled and State.Aim_TargetPart ~= "None" and IsFiringActive then
-		if targetPart and targetPart.Parent then
+	-- CHỈ BẮT TÂM KHI NGƯỜI CHƠI ĐANG BẤM NÚT BẮN
+	if State.Aim_Enabled and State.Aim_TargetPart ~= "None" and isActivelyFiring() then
+		if CurrentLockedTargetPart and CurrentLockedTargetPart.Parent then
 			local camPos = Camera.CFrame.Position
-			Camera.CFrame = CFrame.lookAt(camPos, targetPart.Position)
+			Camera.CFrame = CFrame.lookAt(camPos, CurrentLockedTargetPart.Position)
 		end
 	end
+end)
 
-	-- Cập nhật ESP 2D cho toàn bộ người chơi trong trận đấu
-	local anyESPEnabled = State.ESP_Box2D or State.ESP_Health or State.ESP_Distance or State.ESP_Name or State.ESP_Tracer
+RunService.RenderStepped:Connect(function()
+	Camera = Workspace.CurrentCamera
+	if not Camera then
+		return
+	end
+
+	local anyESPEnabled = State.ESP_Box2D
+		or State.ESP_Health
+		or State.ESP_Distance
+		or State.ESP_Name
+		or State.ESP_Tracer
+
 	local trackedCount = 0
-	local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local myRoot = if LocalPlayer.Character then getCharacterParts(LocalPlayer.Character) else nil
 
 	local counterOrigin = Vector2.new(
 		CounterBadge.AbsolutePosition.X + CounterBadge.AbsoluteSize.X * 0.5,
@@ -712,70 +984,78 @@ RunService:BindToRenderStep("TacticalEngineCore", Enum.RenderPriority.Camera.Val
 		if player ~= LocalPlayer then
 			local visuals = ESPCache[player] or createESPVisuals(player)
 			local character = player.Character
-			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-			local rootPart = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
-			local headPart = character and character:FindFirstChild("Head") :: BasePart?
 
-			if anyESPEnabled and isEnemy(player) and character and humanoid and humanoid.Health > 0 and rootPart and headPart then
-				local rootScreen, onScreen = Camera:WorldToViewportPoint(rootPart.Position)
+			if anyESPEnabled and character and isEnemy(player) then
+				local rootPart, headPart, _, humanoid = getCharacterParts(character)
 
-				if onScreen and rootScreen.Z > 0 then
-					trackedCount += 1
-					visuals.Container.Visible = true
+				if rootPart and headPart and isCharacterAlive(character, humanoid, rootPart) then
+					local rootScreen, onScreen = Camera:WorldToViewportPoint(rootPart.Position)
 
-					local topWorld = headPart.Position + Vector3.new(0, 1.2, 0)
-					local bottomWorld = rootPart.Position - Vector3.new(0, 3.0, 0)
-					local topScreen = Camera:WorldToViewportPoint(topWorld)
-					local bottomScreen = Camera:WorldToViewportPoint(bottomWorld)
+					if onScreen and rootScreen.Z > 0 then
+						trackedCount += 1
+						visuals.Container.Visible = true
 
-					local boxHeight = math.clamp(math.abs(bottomScreen.Y - topScreen.Y), 16, 1200)
-					local boxWidth = boxHeight * 0.62
-					local boxPosX = rootScreen.X - boxWidth * 0.5
-					local boxPosY = topScreen.Y
+						local topWorld = headPart.Position + Vector3.new(0, 1.2, 0)
+						local bottomWorld = rootPart.Position - Vector3.new(0, 3.0, 0)
+						local topScreen = Camera:WorldToViewportPoint(topWorld)
+						local bottomScreen = Camera:WorldToViewportPoint(bottomWorld)
 
-					if State.ESP_Box2D then
-						visuals.BoxOutline.Position = UDim2.fromOffset(boxPosX, boxPosY)
-						visuals.BoxOutline.Size = UDim2.fromOffset(boxWidth, boxHeight)
-						visuals.BoxOutline.Visible = true
+						local boxHeight = math.clamp(math.abs(bottomScreen.Y - topScreen.Y), 16, 1200)
+						local boxWidth = boxHeight * 0.62
+						local boxPosX = rootScreen.X - boxWidth * 0.5
+						local boxPosY = topScreen.Y
+
+						if State.ESP_Box2D then
+							visuals.BoxOutline.Position = UDim2.fromOffset(boxPosX, boxPosY)
+							visuals.BoxOutline.Size = UDim2.fromOffset(boxWidth, boxHeight)
+							visuals.BoxOutline.Visible = true
+						else
+							visuals.BoxOutline.Visible = false
+						end
+
+						local curHp = if humanoid then humanoid.Health else 100
+						local maxHp = if humanoid and humanoid.MaxHealth > 0 then humanoid.MaxHealth else 100
+						local hpRatio = math.clamp(curHp / maxHp, 0, 1)
+
+						if State.ESP_Health then
+							visuals.HealthBarBg.Position = UDim2.fromOffset(boxPosX - 6, boxPosY)
+							visuals.HealthBarBg.Size = UDim2.fromOffset(3, boxHeight)
+							visuals.HealthBarFill.Size = UDim2.fromScale(1, hpRatio)
+							visuals.HealthBarFill.BackgroundColor3 = Color3.fromHSV(hpRatio * 0.33, 0.9, 1)
+							visuals.HealthBarBg.Visible = true
+						else
+							visuals.HealthBarBg.Visible = false
+						end
+
+						local infoParts = {}
+						if State.ESP_Name then
+							table.insert(infoParts, player.DisplayName)
+						end
+						if State.ESP_Health then
+							table.insert(infoParts, string.format("%d HP", math.floor(curHp)))
+						end
+						if State.ESP_Distance then
+							local dist = myRoot and (myRoot.Position - rootPart.Position).Magnitude or rootScreen.Z
+							table.insert(infoParts, string.format("[%dm]", math.floor(dist)))
+						end
+
+						if #infoParts > 0 then
+							visuals.InfoLabel.Text = table.concat(infoParts, " | ")
+							visuals.InfoLabel.Position = UDim2.fromOffset(rootScreen.X, boxPosY - 4)
+							visuals.InfoLabel.Visible = true
+						else
+							visuals.InfoLabel.Visible = false
+						end
+
+						if State.ESP_Tracer then
+							local targetPoint = Vector2.new(rootScreen.X, boxPosY)
+							drawLine2D(visuals.TracerLine, counterOrigin, targetPoint)
+							visuals.TracerLine.Visible = true
+						else
+							visuals.TracerLine.Visible = false
+						end
 					else
-						visuals.BoxOutline.Visible = false
-					end
-
-					local maxHp = math.max(humanoid.MaxHealth, 1)
-					local hpRatio = math.clamp(humanoid.Health / maxHp, 0, 1)
-
-					if State.ESP_Health then
-						visuals.HealthBarBg.Position = UDim2.fromOffset(boxPosX - 6, boxPosY)
-						visuals.HealthBarBg.Size = UDim2.fromOffset(3, boxHeight)
-						visuals.HealthBarFill.Size = UDim2.fromScale(1, hpRatio)
-						visuals.HealthBarFill.BackgroundColor3 = Color3.fromHSV(hpRatio * 0.33, 0.9, 1)
-						visuals.HealthBarBg.Visible = true
-					else
-						visuals.HealthBarBg.Visible = false
-					end
-
-					local infoParts = {}
-					if State.ESP_Name then table.insert(infoParts, player.DisplayName) end
-					if State.ESP_Health then table.insert(infoParts, string.format("%d HP", math.floor(humanoid.Health))) end
-					if State.ESP_Distance then
-						local dist = myRoot and (myRoot.Position - rootPart.Position).Magnitude or rootScreen.Z
-						table.insert(infoParts, string.format("[%dm]", math.floor(dist)))
-					end
-
-					if #infoParts > 0 then
-						visuals.InfoLabel.Text = table.concat(infoParts, " | ")
-						visuals.InfoLabel.Position = UDim2.fromOffset(rootScreen.X, boxPosY - 4)
-						visuals.InfoLabel.Visible = true
-					else
-						visuals.InfoLabel.Visible = false
-					end
-
-					if State.ESP_Tracer then
-						local targetPoint = Vector2.new(rootScreen.X, boxPosY)
-						drawLine2D(visuals.TracerLine, counterOrigin, targetPoint)
-						visuals.TracerLine.Visible = true
-					else
-						visuals.TracerLine.Visible = false
+						visuals.Container.Visible = false
 					end
 				else
 					visuals.Container.Visible = false
