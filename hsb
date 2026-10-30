@@ -1,4 +1,4 @@
--- File: katana_duel_v5_perfect.lua
+-- File: katana_duel_v6_reactive.lua
 -- Runtime: Roblox Luau (Arceus X Neo, Delta, Codex, Vega X, Fluxus)
 
 local Players = game:GetService("Players")
@@ -10,15 +10,14 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 
 -- ============================================================================
--- CẤU HÌNH TỔNG HỢP 2 CHẾ ĐỘ: 1V1 & 2V2
+-- CẤU HÌNH CHIẾN ĐẤU PHẢN XẠ V6 (CHỈ ĐÁNH TRẢ SAU KHI ĐỠ ĐÒN HOẶC KHI ĐỊCH THỦ)
 -- ============================================================================
 local Config = {
-    Mode1v1 = true,              -- Chế độ 1v1 (Full Auto)
-    Mode2v2 = false,             -- Chế độ 2v2 (Full Auto - Tự lọc đồng đội)
-    ParryRange = 16.0,           -- Tầm phản xạ đỡ đòn / lướt né (studs)
-    AttackRange = 9.5,           -- Tầm vung kiếm chém & phá giáp (studs)
-    StopWalkRange = 5.2,         -- Cự ly áp sát đối thủ (studs)
-    ParryHoldDuration = 0.14,    -- Chỉ giơ kiếm đỡ đúng 0.14s rồi nhả ra chém trả ngay
+    Mode1v1 = true,              -- Chế độ 1v1 (Full Auto Phản Xạ)
+    Mode2v2 = false,             -- Chế độ 2v2 (Full Auto + Lọc Đồng Đội)
+    ParryRange = 17.5,           -- Tầm bắt nhịp vung kiếm của đối thủ (studs)
+    AttackRange = 9.8,           -- Tầm vung kiếm phản công / phá giáp (studs)
+    StopWalkRange = 5.5,         -- Cự ly đứng áp sát trước mặt địch (studs)
 }
 
 local State = {
@@ -26,8 +25,9 @@ local State = {
     TargetDist = 999,
     LastEnemyHealth = nil,
     IsBlocking = false,
-    IsCountering = false,
-    ParryEndTime = 0,
+    BlockExpireTime = 0,
+    CounterWindowUntil = 0,      -- Cửa sổ cho phép đánh trả ngay sau khi đỡ đòn thành công
+    CounterSwingsLeft = 0,       -- Số nhát chém phản công tối đa sau mỗi pha đỡ (tránh chém bừa)
     LastParryTime = 0,
     LastDodgeTime = 0,
     LastLightTime = 0,
@@ -35,10 +35,10 @@ local State = {
     LastUltTime = 0,
     LastMoveTime = 0,
 
-    -- Bảng đánh dấu từng nhát kiếm: mỗi hoạt ảnh chém của địch chỉ đỡ ĐÚNG 1 LẦN, tuyệt đối không spam thủ
-    ParriedTracks = setmetatable({}, { __mode = "k" }),
-    BaselineAnims = {},
+    HandledTracks = setmetatable({}, { __mode = "k" }),
     HookedAnimators = setmetatable({}, { __mode = "k" }),
+    ConfirmedAllies2v2 = {},
+    ConfirmedEnemies2v2 = {},
 
     Buttons = {
         Block = nil,
@@ -47,13 +47,11 @@ local State = {
         Dodge = nil,
         Ultimate = nil,
     },
-    ConfirmedAllies2v2 = {},
-    ConfirmedEnemies2v2 = {},
-    StatusText = "Sẵn sàng!",
+    StatusText = "Sẵn sàng canh đỡ!",
 }
 
 -- ============================================================================
--- 1. HỆ THỐNG ĐIỀU KHIỂN ĐA TẦNG (HOẠT ĐỘNG CẢ KHI HIỆN NÚT MOBILE LẪN PHÍM PC)
+-- 1. HỆ THỐNG BẤM NÚT ĐỒNG BỘ (TƯƠNG THÍCH CẢ NÚT CẢM ỨNG LẪN PHÍM TẮT PC)
 -- ============================================================================
 
 local ButtonKeywords = {
@@ -64,7 +62,7 @@ local ButtonKeywords = {
     Ultimate = { "siêu cấp", "sieu cap", "sơ cấp", "kỹ năng tối thượng", "ultimate", "ult" },
 }
 
-local function matchKeyword(str, list)
+local function hasKeyword(str, list)
     if type(str) ~= "string" or str == "" then return false end
     local lower = string.lower(str)
     for _, w in ipairs(list) do
@@ -75,10 +73,10 @@ local function matchKeyword(str, list)
     return false
 end
 
-local function getClickableGui(inst)
+local function findButtonObject(inst)
     if inst:IsA("GuiButton") then return inst end
-    local up = inst:FindFirstAncestorWhichIsA("GuiButton")
-    if up then return up end
+    local anc = inst:FindFirstAncestorWhichIsA("GuiButton")
+    if anc then return anc end
     if inst.Parent and inst.Parent:IsA("GuiObject") then
         for _, ch in ipairs(inst.Parent:GetChildren()) do
             if ch:IsA("GuiButton") then return ch end
@@ -98,10 +96,10 @@ local function scanButtons()
             local loc = ""
             pcall(function() loc = desc.LocalizedText or "" end)
 
-            local btn = getClickableGui(desc)
+            local btn = findButtonObject(desc)
             if btn and btn.AbsoluteSize.X > 15 then
                 for action, kwList in pairs(ButtonKeywords) do
-                    if matchKeyword(raw, kwList) or matchKeyword(loc, kwList) or matchKeyword(btn.Name, kwList) then
+                    if hasKeyword(raw, kwList) or hasKeyword(loc, kwList) or hasKeyword(btn.Name, kwList) then
                         State.Buttons[action] = btn
                     end
                 end
@@ -110,7 +108,7 @@ local function scanButtons()
     end
 end
 
-local function fireGuiSignals(btn, isDown)
+local function fireGuiButton(btn, isDown)
     if not btn or not btn.Parent then return end
     if typeof(firesignal) == "function" and btn:IsA("GuiButton") then
         pcall(function()
@@ -136,8 +134,7 @@ local function fireGuiSignals(btn, isDown)
     end
 end
 
--- Lấy vị trí an toàn phía bên phải màn hình để gửi lệnh M1/M2 mà không bao giờ chạm vào bảng Menu bên trái
-local function getSafeClickCoords(action)
+local function getSafeRightScreenPos(action)
     local btn = State.Buttons[action]
     local inset = GuiService:GetGuiInset()
     if btn and btn.Parent and btn.AbsoluteSize.X > 15 then
@@ -146,10 +143,10 @@ local function getSafeClickCoords(action)
     end
     local cam = workspace.CurrentCamera
     local vp = cam and cam.ViewportSize or Vector2.new(800, 450)
-    return vp.X * 0.78, vp.Y * 0.65
+    return vp.X * 0.80, vp.Y * 0.65
 end
 
-local function sendAction(action, mode)
+local function doAction(action, mode)
     if GuiService.MenuIsOpen then return end
     local btn = State.Buttons[action]
 
@@ -157,46 +154,42 @@ local function sendAction(action, mode)
         if mode == "Down" then
             if not State.IsBlocking then
                 State.IsBlocking = true
-                fireGuiSignals(btn, true)
+                fireGuiButton(btn, true)
                 pcall(function() VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.F, false, game) end)
             end
         elseif mode == "Up" then
             if State.IsBlocking then
                 State.IsBlocking = false
-                fireGuiSignals(btn, false)
+                fireGuiButton(btn, false)
                 pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
             end
         end
 
     elseif action == "Light" then
-        -- Luôn nhả nút Đỡ trước khi vung kiếm chém
         if State.IsBlocking then
             State.IsBlocking = false
-            fireGuiSignals(State.Buttons.Block, false)
+            fireGuiButton(State.Buttons.Block, false)
             pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
         end
-        fireGuiSignals(btn, true)
-        local cx, cy = getSafeClickCoords("Light")
+        fireGuiButton(btn, true)
+        local cx, cy = getSafeRightScreenPos("Light")
         pcall(function()
-            -- Button 0 = M1 (Tấn công nhẹ / ÁNH SÁNG)
             VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
             task.delay(0.03, function()
                 VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
-                fireGuiSignals(btn, false)
+                fireGuiButton(btn, false)
             end)
         end)
 
     elseif action == "Heavy" then
-        -- Chiêu Phá Phòng Thủ (Nặng / Tấn công mạnh / M2)
         if State.IsBlocking then
             State.IsBlocking = false
-            fireGuiSignals(State.Buttons.Block, false)
+            fireGuiButton(State.Buttons.Block, false)
             pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
         end
-        fireGuiSignals(btn, true)
-        local cx, cy = getSafeClickCoords("Heavy")
+        fireGuiButton(btn, true)
+        local cx, cy = getSafeRightScreenPos("Heavy")
         pcall(function()
-            -- Nếu nút cảm ứng Nặng đang hiện thì chạm thẳng vào tâm nút Nặng, đồng thời gửi M2 (Button 1) cho chế độ PC
             if btn and btn.Visible then
                 VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
             end
@@ -206,37 +199,36 @@ local function sendAction(action, mode)
                     VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
                 end
                 VirtualInputManager:SendMouseButtonEvent(cx, cy, 1, false, game, 1)
-                fireGuiSignals(btn, false)
+                fireGuiButton(btn, false)
             end)
         end)
 
     elseif action == "Dodge" then
         if State.IsBlocking then
             State.IsBlocking = false
-            fireGuiSignals(State.Buttons.Block, false)
+            fireGuiButton(State.Buttons.Block, false)
             pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
         end
-        fireGuiSignals(btn, true)
+        fireGuiButton(btn, true)
         pcall(function()
             VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Q, false, game)
             task.delay(0.04, function()
                 VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Q, false, game)
-                fireGuiSignals(btn, false)
+                fireGuiButton(btn, false)
             end)
         end)
 
     elseif action == "Ultimate" then
-        -- Skill Nộ / Siêu cấp / [R] Kỹ năng tối thượng
         if State.IsBlocking then
             State.IsBlocking = false
-            fireGuiSignals(State.Buttons.Block, false)
+            fireGuiButton(State.Buttons.Block, false)
             pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game) end)
         end
-        fireGuiSignals(btn, true)
+        fireGuiButton(btn, true)
         pcall(function()
             VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
             if btn and btn.Visible then
-                local cx, cy = getSafeClickCoords("Ultimate")
+                local cx, cy = getSafeRightScreenPos("Ultimate")
                 VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, true, game, 1)
                 task.delay(0.04, function()
                     VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
@@ -244,43 +236,36 @@ local function sendAction(action, mode)
             end
             task.delay(0.04, function()
                 VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
-                fireGuiSignals(btn, false)
+                fireGuiButton(btn, false)
             end)
         end)
     end
 end
 
--- Kiểm tra xem tất cả cha của một GUI có đang hiển thị thật trên màn hình không
-local function isGuiActuallyVisible(guiObj)
-    local curr = guiObj
-    while curr and curr ~= game do
-        if curr:IsA("GuiObject") and not curr.Visible then
-            return false
-        end
-        if curr:IsA("ScreenGui") and not curr.Enabled then
-            return false
-        end
-        curr = curr.Parent
+local function isGuiShown(guiObj)
+    local cur = guiObj
+    while cur and cur ~= game do
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+        cur = cur.Parent
     end
     return true
 end
 
--- Kiểm tra Skill Nộ (Siêu cấp / [R] Kỹ năng tối thượng) đã sẵn sàng chưa
-local function isRageUltimateReady()
+local function isUltimateReady()
     local btn = State.Buttons.Ultimate
-    if btn and btn.Parent and isGuiActuallyVisible(btn) and btn.AbsoluteSize.X > 18 then
+    if btn and btn.Parent and isGuiShown(btn) and btn.AbsoluteSize.X > 18 then
         return true
     end
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if pg then
         for _, lbl in ipairs(pg:GetDescendants()) do
-            if lbl:IsA("TextLabel") and isGuiActuallyVisible(lbl) then
+            if lbl:IsA("TextLabel") and isGuiShown(lbl) then
                 local raw = string.lower(lbl.Text or "")
                 local loc = ""
                 pcall(function() loc = string.lower(lbl.LocalizedText or "") end)
                 if string.find(raw, "kỹ năng tối thượng", 1, true) or string.find(loc, "kỹ năng tối thượng", 1, true)
-                    or string.find(raw, "siêu cấp", 1, true) or string.find(loc, "siêu cấp", 1, true)
-                    or string.find(raw, "ultimate", 1, true) then
+                    or string.find(raw, "siêu cấp", 1, true) or string.find(loc, "siêu cấp", 1, true) then
                     return true
                 end
             end
@@ -290,20 +275,20 @@ local function isRageUltimateReady()
 end
 
 -- ============================================================================
--- 2. NHẬN DIỆN ĐỒNG ĐỘI & KẺ ĐỊCH CHUẨN 100% TRONG 2V2 (SỬA LỖI VIDEO 9)
+-- 2. NHẬN DIỆN MỤC TIÊU CHUẨN XÁC CHO 1V1 VÀ 2V2
 -- ============================================================================
 
-local function update2v2Teams()
+local function update2v2Roster()
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     local cam = workspace.CurrentCamera
     if not pg or not cam then return end
 
     local vp = cam.ViewportSize
     local halfW = vp.X * 0.5
-    local maxTopY = vp.Y * 0.48 -- Quét toàn bộ cả thanh máu tầng 1 lẫn tầng 2 trong 2v2
+    local maxTopY = vp.Y * 0.48
 
     for _, lbl in ipairs(pg:GetDescendants()) do
-        if lbl:IsA("TextLabel") and isGuiActuallyVisible(lbl) then
+        if lbl:IsA("TextLabel") and isGuiShown(lbl) then
             local pos = lbl.AbsolutePosition
             local size = lbl.AbsoluteSize
             if pos.Y >= 0 and pos.Y < maxTopY and size.X > 20 then
@@ -311,24 +296,21 @@ local function update2v2Teams()
                 local loc = ""
                 pcall(function() loc = string.lower(lbl.LocalizedText or "") end)
                 local combined = raw .. " " .. loc
-
                 local centerX = pos.X + (size.X * 0.5)
+
                 for _, plr in ipairs(Players:GetPlayers()) do
                     if plr ~= LocalPlayer then
                         local uName = string.lower(plr.Name)
                         local dName = string.lower(plr.DisplayName)
-                        -- Khớp chính xác @username hoặc tên dài >= 4 ký tự để không bị trùng chữ ngẫu nhiên
                         local matched = string.find(combined, "@" .. uName, 1, true)
                             or (#uName >= 4 and string.find(combined, uName, 1, true))
                             or (#dName >= 4 and string.find(combined, dName, 1, true))
 
                         if matched then
                             if centerX < halfW then
-                                -- Nằm bên TRÁI màn hình (cùng phía với bạn) -> Chắc chắn là ĐỒNG ĐỘI!
                                 State.ConfirmedAllies2v2[plr.UserId] = true
                                 State.ConfirmedEnemies2v2[plr.UserId] = nil
                             else
-                                -- Nằm bên PHẢI màn hình -> Chắc chắn là KẺ ĐỊCH!
                                 State.ConfirmedEnemies2v2[plr.UserId] = true
                                 State.ConfirmedAllies2v2[plr.UserId] = nil
                             end
@@ -340,32 +322,26 @@ local function update2v2Teams()
     end
 end
 
--- Quét vòng tròn xanh lá cây dưới chân đồng đội trong cả Character lẫn Workspace
-local function hasGreenTeamCircle(char)
+local function hasGreenAllyRingUnderFeet(char)
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return false end
 
-    -- 1. Kiểm tra bên trong Character
     for _, obj in ipairs(char:GetDescendants()) do
         local col = nil
         pcall(function()
             if (obj:IsA("BasePart") or obj:IsA("MeshPart")) and obj.Transparency < 0.9 then col = obj.Color
-            elseif obj:IsA("Decal") or obj:IsA("ImageLabel") then col = obj.ImageColor3
-            elseif obj:IsA("Beam") or obj:IsA("ParticleEmitter") then col = obj.Color.Keypoints[1].Value
-            elseif obj:IsA("Highlight") and obj.Enabled then col = obj.OutlineColor end
+            elseif obj:IsA("Decal") or obj:IsA("ImageLabel") then col = obj.ImageColor3 end
         end)
         if col and col.G > 0.62 and col.R < 0.42 and col.B < 0.45 then
             return true
         end
     end
 
-    -- 2. Kiểm tra các vòng tròn dưới mặt đất trong Workspace quanh chân nhân vật (bán kính 4.5 studs)
-    local rootPos = root.Position
+    local rPos = root.Position
     for _, obj in ipairs(workspace:GetDescendants()) do
         if (obj:IsA("BasePart") or obj:IsA("MeshPart")) and not obj:IsDescendantOf(char) then
             if obj.Size.Y < 1.5 and (obj.Size.X > 2.5 or obj.Size.Z > 2.5) then
-                local d = (obj.Position - rootPos).Magnitude
-                if d < 5.0 then
+                if (obj.Position - rPos).Magnitude < 5.0 then
                     local c = obj.Color
                     if c.G > 0.62 and c.R < 0.42 and c.B < 0.45 then
                         return true
@@ -374,16 +350,14 @@ local function hasGreenTeamCircle(char)
             end
         end
     end
-
     return false
 end
 
-local function findTarget()
+local function getTarget()
     local myChar = LocalPlayer.Character
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myRoot then return nil, 999 end
 
-    -- CHẾ ĐỘ 1V1: Khóa thẳng đối thủ gần nhất
     if Config.Mode1v1 then
         local best = nil
         local minDist = 999
@@ -404,8 +378,7 @@ local function findTarget()
         return best, minDist
     end
 
-    -- CHẾ ĐỘ 2V2: Lọc bỏ tuyệt đối đồng đội bên trái bảng điểm & người có vòng tròn xanh dưới chân
-    update2v2Teams()
+    update2v2Roster()
     local bestEnemy = nil
     local minDist = 999
 
@@ -415,12 +388,10 @@ local function findTarget()
             local h = c:FindFirstChildOfClass("Humanoid")
             local r = c:FindFirstChild("HumanoidRootPart")
             if h and h.Health > 0 and r then
-                if hasGreenTeamCircle(c) then
+                if hasGreenAllyRingUnderFeet(c) then
                     State.ConfirmedAllies2v2[plr.UserId] = true
                 end
-
-                local isAlly = State.ConfirmedAllies2v2[plr.UserId] == true
-                if not isAlly then
+                if not State.ConfirmedAllies2v2[plr.UserId] then
                     local d = (r.Position - myRoot.Position).Magnitude
                     if d < minDist then
                         minDist = d
@@ -430,12 +401,11 @@ local function findTarget()
             end
         end
     end
-
     return bestEnemy, minDist
 end
 
 -- ============================================================================
--- 3. NHẬN DIỆN CHUẨN: ĐỊCH CHÉM (ĐỠ 1 NHỊP -> ĐÁNH TRẢ) & ĐỊCH THỦ (PHÁ GIÁP)
+-- 3. NHẬN DIỆN ĐÒN CHÉM (KHÔNG BLACKLIST THEO KHOẢNG CÁCH!) & ĐỠ TRỌN NHÁT KIẾM
 -- ============================================================================
 
 local function hasColoredSkill(char)
@@ -456,12 +426,13 @@ local function hasColoredSkill(char)
     return false
 end
 
-local function isRealSwordSwing(track, dist)
+-- Kiểm tra chuẩn xác một AnimationTrack có phải là đòn vung vũ khí tấn công không
+-- (TUYỆT ĐỐI KHÔNG dùng khoảng cách để blacklist AnimationId như lỗi của V5!)
+local function isEnemyAttackTrack(track)
     if not track or not track.IsPlaying then return false end
-    -- Đòn chém không bao giờ lặp lại (Looped == false) và có thời lượng từ 0.20s đến 1.55s
-    if track.Looped or track.Length < 0.20 or track.Length > 1.55 or track.Speed <= 0.15 then
-        return false
-    end
+    if track.Looped then return false end
+    if track.Length < 0.22 or track.Length > 1.85 then return false end
+    if track.Speed <= 0.15 then return false end
 
     local prio = track.Priority
     if prio == Enum.AnimationPriority.Core
@@ -470,29 +441,22 @@ local function isRealSwordSwing(track, dist)
         return false
     end
 
-    local animId = track.Animation and track.Animation.AnimationId or ""
-    if animId == "" or State.BaselineAnims[animId] then return false end
-
     local name = string.lower(track.Name or "")
     if string.find(name, "idle") or string.find(name, "walk") or string.find(name, "run")
-        or string.find(name, "dash") or string.find(name, "dodge") or string.find(name, "jump")
-        or string.find(name, "fall") or string.find(name, "block") or string.find(name, "guard")
-        or string.find(name, "parry") or string.find(name, "hit") or string.find(name, "stun")
-        or string.find(name, "hurt") or string.find(name, "equip") then
-        State.BaselineAnims[animId] = true
-        return false
-    end
-
-    -- Nếu hoạt ảnh phát khi đối thủ ở xa (> 18m), ghi nhận đó là động tác di chuyển/lướt và bỏ qua
-    if dist > 18.0 then
-        State.BaselineAnims[animId] = true
+        or string.find(name, "sprint") or string.find(name, "jump") or string.find(name, "fall")
+        or string.find(name, "dash") or string.find(name, "dodge") or string.find(name, "roll")
+        or string.find(name, "block") or string.find(name, "guard") or string.find(name, "parry")
+        or string.find(name, "hit") or string.find(name, "hurt") or string.find(name, "stun")
+        or string.find(name, "stagger") or string.find(name, "equip") or string.find(name, "unequip")
+        or string.find(name, "emote") or string.find(name, "win") or string.find(name, "death") then
         return false
     end
 
     return true
 end
 
-local function isEnemyGuarding(enemyChar)
+-- Nhận diện khi đối thủ đang giữ kiếm THỦ (Block)
+local function isEnemyBlocking(enemyChar)
     if not enemyChar then return false end
     local hum = enemyChar:FindFirstChildOfClass("Humanoid")
     if not hum then return false end
@@ -522,7 +486,6 @@ local function isEnemyGuarding(enemyChar)
             if string.find(name, "block") or string.find(name, "guard") or string.find(name, "parry") then
                 return true
             end
-            -- Khi giữ kiếm thủ, hoạt ảnh ở tầng Action đứng im khung hình (Speed == 0) hoặc lặp lại khi đi chậm
             if (prio == Enum.AnimationPriority.Action or prio == Enum.AnimationPriority.Action2) then
                 if track.Speed == 0 or (track.Looped and hum.WalkSpeed < 10.5) then
                     return true
@@ -530,73 +493,78 @@ local function isEnemyGuarding(enemyChar)
             end
         end
     end
-
     return false
 end
 
--- Thực hiện ĐỠ ĐÒN ĐÚNG 1 LẦN (0.14s) rồi LẬP TỨC PHẢN CÔNG LẠI LUÔN (Không giữ thủ!)
-local function executeSingleParryThenCounter(enemyChar, isColored)
+-- Hàm phản công NGAY LẬP TỨC sau khi vừa đỡ đòn thành công
+local function fireImmediateCounterAttack()
+    if not (Config.Mode1v1 or Config.Mode2v2) then return end
+    if not State.Target or State.TargetDist > Config.AttackRange then return end
+
+    -- Nhả nút đỡ ngay lập tức để vung kiếm phản công
+    doAction("Block", "Up")
+
+    local now = os.clock()
+    -- Mở cửa sổ cho phép đánh bồi 2 nhát liên tiếp sau khi đỡ được đòn của địch
+    State.CounterWindowUntil = now + 0.65
+    State.CounterSwingsLeft = 2
+
+    if isUltimateReady() and (now - State.LastUltTime > 0.5) then
+        State.LastUltTime = now
+        doAction("Ultimate", "Tap")
+    elseif isEnemyBlocking(State.Target) then
+        State.LastHeavyTime = now
+        doAction("Heavy", "Tap")
+    else
+        State.LastLightTime = now
+        State.CounterSwingsLeft = State.CounterSwingsLeft - 1
+        doAction("Light", "Tap")
+    end
+end
+
+-- Hàm ĐỠ TRỌN NHÁT CHÉM của đối thủ rồi LẬP TỨC ĐÁNH TRẢ (Không nhả sớm khi vũ khí địch chưa chạm tới!)
+local function startParryForSwing(enemyChar, track, isColored)
     if not (Config.Mode1v1 or Config.Mode2v2) then return end
     if State.TargetDist > Config.ParryRange then return end
 
     local now = os.clock()
+    -- Huỷ mọi ý định chém đang chờ để ưu tiên tuyệt đối cho việc ĐỠ ĐÒN
+    State.CounterSwingsLeft = 0
+    State.CounterWindowUntil = 0
 
-    -- Nếu địch dùng Skill màu sắc -> Lướt (Né) rồi đánh trả ngay
+    -- 1. Nếu là Skill màu sắc (Đỏ/Tím/Vàng) -> Bấm nút Lướt (Né) rồi phản công ngay
     if isColored then
-        if now - State.LastDodgeTime >= 0.35 then
+        if now - State.LastDodgeTime >= 0.30 then
             State.LastDodgeTime = now
-            sendAction("Dodge", "Tap")
-            task.delay(0.14, function()
-                if (Config.Mode1v1 or Config.Mode2v2) and State.TargetDist <= Config.AttackRange then
-                    if isRageUltimateReady() and (os.clock() - State.LastUltTime > 0.6) then
-                        State.LastUltTime = os.clock()
-                        sendAction("Ultimate", "Tap")
-                    else
-                        sendAction("Light", "Tap")
-                        State.LastLightTime = os.clock()
-                    end
-                end
+            doAction("Dodge", "Tap")
+            task.delay(0.16, function()
+                fireImmediateCounterAttack()
             end)
         end
         return
     end
 
-    -- Đòn đánh thường: Giơ kiếm lên đỡ đúng 0.14s -> Nhả nút đỡ -> Chém trả lại luôn!
-    if now - State.LastParryTime >= 0.22 then
-        State.LastParryTime = now
-        State.ParryEndTime = now + Config.ParryHoldDuration
-        State.IsCountering = true
+    -- 2. Nếu là đòn chém thường:
+    -- Tính thời gian vung vũ khí thực tế của nhát chém đó (cây thương/đao dài trong Video 10 mất ~0.35s - 0.48s để chạm người)
+    local swingLen = (track and track.Length and track.Length > 0.2) and (track.Length / math.max(track.Speed, 0.5)) or 0.55
+    local remainingHitTime = math.clamp((swingLen * 0.62) - (track and track.TimePosition or 0), 0.24, 0.46)
 
-        sendAction("Block", "Down")
+    State.LastParryTime = now
+    State.BlockExpireTime = math.max(State.BlockExpireTime, now + remainingHitTime)
 
-        task.delay(Config.ParryHoldDuration, function()
-            -- Bắt buộc nhả nút đỡ ra ngay, tuyệt đối không giữ lỳ
-            sendAction("Block", "Up")
+    -- Giơ kiếm lên Chặn đòn ngay tức khắc
+    doAction("Block", "Down")
 
-            if (Config.Mode1v1 or Config.Mode2v2) and State.Target and State.TargetDist <= Config.AttackRange then
-                -- Nếu có sẵn Skill Nộ (Siêu cấp / [R]) thì xả luôn sau khi đỡ đòn!
-                if isRageUltimateReady() and (os.clock() - State.LastUltTime > 0.6) then
-                    State.LastUltTime = os.clock()
-                    sendAction("Ultimate", "Tap")
-                elseif isEnemyGuarding(State.Target) then
-                    -- Nếu địch lập tức thu kiếm về thủ -> tung chiêu Phá Phòng Thủ (Nặng / M2)
-                    State.LastHeavyTime = os.clock()
-                    sendAction("Heavy", "Tap")
-                else
-                    -- Phản công nhanh bằng đòn đánh thường (ÁNH SÁNG / M1)
-                    State.LastLightTime = os.clock()
-                    sendAction("Light", "Tap")
-                end
-            end
-
-            task.delay(0.08, function()
-                State.IsCountering = false
-            end)
-        end)
-    end
+    -- Ngay khi lưỡi kiếm/thương của địch vừa đập vào kiếm mình (hoặc kết thúc pha vung) -> Nhả đỡ và CHÉM TRẢ NGAY!
+    task.delay(remainingHitTime, function()
+        if os.clock() >= State.BlockExpireTime - 0.02 then
+            fireImmediateCounterAttack()
+        end
+    end)
 end
 
-local function hookEnemy(enemyChar)
+-- Gắn cảm biến lên đối thủ: bắt cả AnimationPlayed lẫn âm thanh/hiệu ứng tia lửa khi đỡ đòn thành công (Parry Spark)
+local function hookEnemyCharacter(enemyChar)
     if not enemyChar then return end
     local hum = enemyChar:FindFirstChildOfClass("Humanoid")
     if not hum then return end
@@ -604,25 +572,58 @@ local function hookEnemy(enemyChar)
     if State.HookedAnimators[animator] then return end
     State.HookedAnimators[animator] = true
 
+    -- Bắt 0ms ngay khi đối thủ vừa bắt đầu nhấc vũ khí
     animator.AnimationPlayed:Connect(function(track)
         if not (Config.Mode1v1 or Config.Mode2v2) then return end
         if enemyChar ~= State.Target then return end
-        if State.ParriedTracks[track] then return end
+        if State.HandledTracks[track] then return end
 
-        if isRealSwordSwing(track, State.TargetDist) then
-            State.ParriedTracks[track] = true
-            executeSingleParryThenCounter(enemyChar, hasColoredSkill(enemyChar))
+        if isEnemyAttackTrack(track) then
+            State.HandledTracks[track] = true
+            local colored = hasColoredSkill(enemyChar)
+            startParryForSwing(enemyChar, track, colored)
+            if not colored then
+                task.delay(0.03, function()
+                    if hasColoredSkill(enemyChar) then
+                        startParryForSwing(enemyChar, track, true)
+                    end
+                end)
+            end
         end
     end)
 end
 
+-- Phát hiện khoảnh khắc kiếm mình vừa ĐỠ TRÚNG đòn của địch (tia lửa Parry / âm thanh keng / địch bị khựng)
+local function didJustSuccessfullyParry(myChar, enemyChar)
+    if not State.IsBlocking then return false end
+    for _, char in ipairs({ myChar, enemyChar }) do
+        if char then
+            for _, desc in ipairs(char:GetDescendants()) do
+                if desc:IsA("Sound") and desc.IsPlaying and desc.TimePosition < 0.18 then
+                    local sn = string.lower(desc.Name)
+                    if string.find(sn, "parry") or string.find(sn, "clash") or string.find(sn, "clang")
+                        or string.find(sn, "block") or string.find(sn, "deflect") or string.find(sn, "spark") then
+                        return true
+                    end
+                elseif desc:IsA("ParticleEmitter") and desc.Enabled then
+                    local pn = string.lower(desc.Name)
+                    if string.find(pn, "parry") or string.find(pn, "clash") or string.find(pn, "spark") or string.find(pn, "block") then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
 -- ============================================================================
--- 4. VÒNG LẶP CHIẾN ĐẤU CHÍNH (ĐỠ 1 NHỊP -> PHẢN CÔNG / PHÁ THỦ / XẢ SKILL NỘ)
+-- 4. VÒNG LẶP CHIẾN ĐẤU V6: CANH ĐỠ TRƯỚC -> ĐỠ TRÚNG MỚI PHẢN CÔNG!
 -- ============================================================================
 
-local function combatTick()
+local function reactiveCombatLoop()
     if not (Config.Mode1v1 or Config.Mode2v2) then
-        if State.IsBlocking then sendAction("Block", "Up") end
+        if State.IsBlocking then doAction("Block", "Up") end
         State.StatusText = "Đang Tắt [OFF]"
         return
     end
@@ -632,83 +633,94 @@ local function combatTick()
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     if not myHum or not myRoot or myHum.Health <= 0 then return end
 
-    local enemy, dist = findTarget()
+    local enemy, dist = getTarget()
     if enemy ~= State.Target then
         State.Target = enemy
         State.LastEnemyHealth = nil
-        if enemy then hookEnemy(enemy) end
+        State.CounterSwingsLeft = 0
+        if enemy then hookEnemyCharacter(enemy) end
     end
     State.TargetDist = dist
 
     if not enemy then
-        if State.IsBlocking then sendAction("Block", "Up") end
+        if State.IsBlocking then doAction("Block", "Up") end
         State.StatusText = Config.Mode1v1 and "1v1: Đang đợi đối thủ..." or "2v2: Đang tìm kẻ địch..."
         return
     end
 
-    hookEnemy(enemy)
+    hookEnemyCharacter(enemy)
     local enemyHum = enemy:FindFirstChildOfClass("Humanoid")
     local enemyRoot = enemy:FindFirstChild("HumanoidRootPart")
     if not enemyHum or not enemyRoot then return end
 
     local now = os.clock()
 
-    -- Đảm bảo nhả nút đỡ ngay khi hết nhịp 0.14s (chống kẹt nút thủ 100%)
-    if State.IsBlocking and now >= State.ParryEndTime then
-        sendAction("Block", "Up")
+    -- ========================================================================
+    -- 1. NẾU VỪA ĐỠ TRÚNG KIẾM ĐỊCH (NẢY TIA LỬA / KENG) -> PHẢN CÔNG NGAY LẬP TỨC!
+    -- ========================================================================
+    if State.IsBlocking and didJustSuccessfullyParry(myChar, enemy) then
+        State.BlockExpireTime = 0
+        fireImmediateCounterAttack()
+        return
+    end
+
+    -- Tự động nhả nút đỡ khi hết nhịp vung kiếm của địch và chuyển sang phản công
+    if State.IsBlocking and now >= State.BlockExpireTime then
+        fireImmediateCounterAttack()
     end
 
     -- ========================================================================
-    -- 1. PHÁT HIỆN ĐÁNH TRÚNG ĐỊCH (MÁU ĐỊCH TỤT) -> BẬT LUÔN SKILL NỘ (SIÊU CẤP)
+    -- 2. KHI ĐÁNH TRÚNG ĐỊCH (ĐỊCH TỤT MÁU) -> XẢ LUÔN SKILL NỘ (NẾU CÓ)
     -- ========================================================================
     local currentHp = enemyHum.Health
-    local enemyJustTookDamage = false
+    local enemyTookDamage = false
     if State.LastEnemyHealth ~= nil and currentHp < State.LastEnemyHealth then
-        enemyJustTookDamage = true
-        if dist <= 13.0 and isRageUltimateReady() and (now - State.LastUltTime > 0.5) then
+        enemyTookDamage = true
+        -- Khi chém trúng địch làm địch bị choáng, đánh dấu các track choáng để không nhầm là địch tấn công
+        local animator = enemyHum:FindFirstChildOfClass("Animator") or enemyHum
+        for _, t in ipairs(animator:GetPlayingAnimationTracks()) do
+            State.HandledTracks[t] = true
+        end
+        if dist <= 13.0 and isUltimateReady() and (now - State.LastUltTime > 0.5) then
             State.LastUltTime = now
-            sendAction("Ultimate", "Tap")
+            doAction("Ultimate", "Tap")
         end
     end
     State.LastEnemyHealth = currentHp
 
     -- ========================================================================
-    -- 2. KIỂM TRA ĐÒN CHÉM MỚI CỦA ĐỊCH (MỖI NHÁT CHÉM CHỈ ĐỠ ĐÚNG 1 LẦN!)
+    -- 3. QUÉT ĐÒN VUNG KIẾM CỦA ĐỊCH MỖI FRAME (BẮT MỌI NHÁT CHÉM KỂ CẢ KHI VỪA LAO VÀO)
     -- ========================================================================
-    local newAttackTrack = nil
-    if not enemyJustTookDamage then
+    local activeSwingTrack = nil
+    if not enemyTookDamage then
         local animator = enemyHum:FindFirstChildOfClass("Animator") or enemyHum
         for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-            if not State.ParriedTracks[track] and isRealSwordSwing(track, dist) then
-                if track.TimePosition <= 0.35 then
-                    newAttackTrack = track
+            if isEnemyAttackTrack(track) then
+                local progress = (track.Length > 0) and (track.TimePosition / track.Length) or 0.3
+                -- Bắt trọn giai đoạn vung vũ khí (từ 0% đến 65% thời lượng nhát chém)
+                if progress <= 0.65 and not State.HandledTracks[track] then
+                    activeSwingTrack = track
                     break
                 end
             end
         end
-    else
-        -- Nếu địch vừa bị chém trúng, đánh dấu các hoạt ảnh bị choáng hiện tại để không nhận nhầm là địch chém
-        local animator = enemyHum:FindFirstChildOfClass("Animator") or enemyHum
-        for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-            State.ParriedTracks[track] = true
-        end
     end
 
     local coloredNow = hasColoredSkill(enemy)
-    if newAttackTrack and dist <= Config.ParryRange then
-        State.ParriedTracks[newAttackTrack] = true
-        executeSingleParryThenCounter(enemy, coloredNow)
-    elseif coloredNow and dist <= Config.ParryRange and (now - State.LastDodgeTime > 0.4) then
-        executeSingleParryThenCounter(enemy, true)
+    if activeSwingTrack and dist <= Config.ParryRange then
+        State.HandledTracks[activeSwingTrack] = true
+        startParryForSwing(enemy, activeSwingTrack, coloredNow)
+    elseif coloredNow and dist <= Config.ParryRange and (now - State.LastDodgeTime > 0.38) then
+        startParryForSwing(enemy, nil, true)
     end
 
     -- ========================================================================
-    -- 3. TỰ ĐI ĐẾN ĐỊCH & XOAY MẶT HƯỚNG VỀ ĐỊCH
+    -- 4. TỰ ĐI ĐẾN ĐỊCH & XOAY MẶT HƯỚNG VỀ ĐỊCH ĐỂ ĐỠ TRÚNG 100%
     -- ========================================================================
     local myPos = myRoot.Position
     local enemyPos = enemyRoot.Position
 
-    if dist <= 18.0 and dist > 0.5 and (now - State.LastDodgeTime > 0.18) then
+    if dist <= 18.5 and dist > 0.5 and (now - State.LastDodgeTime > 0.18) then
         pcall(function()
             myRoot.CFrame = CFrame.lookAt(myPos, Vector3.new(enemyPos.X, myPos.Y, enemyPos.Z))
         end)
@@ -721,7 +733,7 @@ local function combatTick()
             local flat = Vector3.new(diff.X, 0, diff.Z)
             local goal = enemyPos
             if flat.Magnitude > 0.1 then
-                goal = enemyPos + (flat.Unit * (Config.StopWalkRange - 0.4))
+                goal = enemyPos + (flat.Unit * (Config.StopWalkRange - 0.3))
             end
             myHum:MoveTo(goal)
         elseif dist <= Config.StopWalkRange then
@@ -730,58 +742,69 @@ local function combatTick()
     end
 
     -- ========================================================================
-    -- 4. TẤN CÔNG: ĐỊCH THỦ -> PHÁ PHÒNG THỦ (NẶNG/M2) | CÓ NỘ -> XẢ NỘ | CHÉM THƯỜNG
+    -- 5. QUY TẮC TẤN CÔNG NGHIÊM NGẶT (TUYỆT ĐỐI KHÔNG CHÉM BỪA!):
+    --    - Nếu địch giơ kiếm THỦ -> Dùng chiêu Phá Phòng Thủ (Nặng / M2) rồi bồi 1 nhát
+    --    - Nếu vừa ĐỠ ĐƯỢC đòn của địch (còn trong CounterWindow) -> Chém phản công
+    --    - Bình thường khi địch chưa đánh và không thủ -> ĐỨNG CANH ĐỠ, KHÔNG CHÉM BỪA!
     -- ========================================================================
-    local enemyBlocking = isEnemyGuarding(enemy)
+    local enemyBlocking = isEnemyBlocking(enemy)
 
-    if not State.IsBlocking and not State.IsCountering and dist <= Config.AttackRange then
-        -- Ưu tiên 1: Nếu có Skill Nộ (Siêu cấp / [R]) và địch đang không đỡ -> Xả Skill Nộ luôn!
-        if isRageUltimateReady() and not enemyBlocking and (now - State.LastUltTime >= 0.55) then
-            State.LastUltTime = now
-            sendAction("Ultimate", "Tap")
-
-        -- Ưu tiên 2: Nếu kẻ địch đang giơ kiếm THỦ -> Dùng chiêu PHÁ PHÒNG THỦ (Nặng / M2) ngay lập tức!
-        elseif enemyBlocking then
-            if now - State.LastHeavyTime >= 0.55 then
+    if not State.IsBlocking and dist <= Config.AttackRange then
+        if enemyBlocking then
+            -- Kẻ địch đang thủ -> Dừng ngay chém thường, tung chiêu Phá Phòng Thủ (Nặng / M2)!
+            State.CounterSwingsLeft = 0
+            if now - State.LastHeavyTime >= 0.58 then
                 State.LastHeavyTime = now
-                sendAction("Heavy", "Tap")
+                doAction("Heavy", "Tap")
+                -- Sau khi phá thủ 0.35s, mở cửa sổ bồi thêm 1 nhát chém
+                State.CounterWindowUntil = now + 0.70
+                State.CounterSwingsLeft = 1
             end
 
-        -- Ưu tiên 3: Kẻ địch không thủ và không đang chém -> Đánh thường (ÁNH SÁNG / M1)
-        elseif now - State.LastLightTime >= 0.26 then
-            State.LastLightTime = now
-            sendAction("Light", "Tap")
+        elseif isUltimateReady() and (now <= State.CounterWindowUntil) and (now - State.LastUltTime >= 0.55) then
+            -- Vừa đỡ đòn xong mà có Skill Nộ -> Xả luôn Skill Nộ!
+            State.LastUltTime = now
+            doAction("Ultimate", "Tap")
+
+        elseif now <= State.CounterWindowUntil and State.CounterSwingsLeft > 0 then
+            -- Chỉ chém trả trong cửa sổ phản công sau khi vừa ĐỠ ĐƯỢC đòn của đối thủ!
+            if now - State.LastLightTime >= 0.25 then
+                State.LastLightTime = now
+                State.CounterSwingsLeft = State.CounterSwingsLeft - 1
+                doAction("Light", "Tap")
+            end
         end
     end
 
-    local modeStr = Config.Mode1v1 and "1v1" or "2v2"
-    local actStr = State.IsBlocking and "ĐỠ -> PHẢN CÔNG!"
+    local modeTag = Config.Mode1v1 and "1v1" or "2v2"
+    local statusAction = State.IsBlocking and "ĐANG ĐỠ ĐÒN!"
         or (enemyBlocking and "ĐỊCH THỦ -> PHÁ GIÁP!"
-        or (isRageUltimateReady() and "XẢ SKILL NỘ [R]!" or "Đang chém"))
-    State.StatusText = string.format("[%s] %s (%.1fm) %s", modeStr, enemy.Name:sub(1, 8), dist, actStr)
+        or (now <= State.CounterWindowUntil and "PHẢN CÔNG NGAY!"
+        or "Canh đỡ đòn địch"))
+    State.StatusText = string.format("[%s] %s (%.1fm) %s", modeTag, enemy.Name:sub(1, 8), dist, statusAction)
 end
 
 -- ============================================================================
--- 5. GIAO DIỆN MENU 2 NÚT (1V1 & 2V2)
+-- 5. GIAO DIỆN MENU 2 NÚT (CHẾ ĐỘ 1V1 & CHẾ ĐỘ 2V2)
 -- ============================================================================
 
-local function createHudV5()
+local function buildHudV6()
     local parentGui = (typeof(gethui) == "function" and gethui()) or CoreGui
     for _, name in ipairs({
-        "OllieKatanaDuelHUD", "OllieKatanaDuelHUD_V2",
-        "OllieKatanaDuelHUD_V3", "OllieKatanaDuelHUD_V4", "OllieKatanaDuelHUD_V5"
+        "OllieKatanaDuelHUD", "OllieKatanaDuelHUD_V2", "OllieKatanaDuelHUD_V3",
+        "OllieKatanaDuelHUD_V4", "OllieKatanaDuelHUD_V5", "OllieKatanaDuelHUD_V6"
     }) do
         local old = parentGui:FindFirstChild(name)
         if old then old:Destroy() end
     end
 
     local sg = Instance.new("ScreenGui")
-    sg.Name = "OllieKatanaDuelHUD_V5"
+    sg.Name = "OllieKatanaDuelHUD_V6"
     sg.ResetOnSpawn = false
     sg.Parent = parentGui
 
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 215, 0, 112)
+    frame.Size = UDim2.new(0, 220, 0, 112)
     frame.Position = UDim2.new(0.015, 0, 0.18, 0)
     frame.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
     frame.BackgroundTransparency = 0.08
@@ -799,7 +822,7 @@ local function createHudV5()
     title.Size = UDim2.new(1, -12, 0, 20)
     title.Position = UDim2.new(0, 6, 0, 4)
     title.BackgroundTransparency = 1
-    title.Text = "KATANA AUTO V5 [1v1 / 2v2]"
+    title.Text = "KATANA AUTO V6 [1v1 / 2v2]"
     title.TextColor3 = Color3.fromRGB(255, 95, 95)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 12
@@ -835,7 +858,7 @@ local function createHudV5()
     btn2v2.Parent = frame
     Instance.new("UICorner", btn2v2).CornerRadius = UDim.new(0, 6)
 
-    local function syncButtons()
+    local function refreshUi()
         btn1v1.Text = "Chế Độ 1v1 (Full Auto): " .. (Config.Mode1v1 and "BẬT" or "TẮT")
         btn1v1.BackgroundColor3 = Config.Mode1v1 and Color3.fromRGB(35, 125, 62) or Color3.fromRGB(45, 45, 55)
 
@@ -846,16 +869,16 @@ local function createHudV5()
     btn1v1.MouseButton1Click:Connect(function()
         Config.Mode1v1 = not Config.Mode1v1
         if Config.Mode1v1 then Config.Mode2v2 = false end
-        syncButtons()
+        refreshUi()
     end)
 
     btn2v2.MouseButton1Click:Connect(function()
         Config.Mode2v2 = not Config.Mode2v2
         if Config.Mode2v2 then Config.Mode1v1 = false end
-        syncButtons()
+        refreshUi()
     end)
 
-    syncButtons()
+    refreshUi()
 
     RunService.RenderStepped:Connect(function()
         statusLbl.Text = State.StatusText
@@ -863,5 +886,5 @@ local function createHudV5()
 end
 
 scanButtons()
-createHudV5()
-RunService.RenderStepped:Connect(combatTick)
+buildHudV6()
+RunService.RenderStepped:Connect(reactiveCombatLoop)
