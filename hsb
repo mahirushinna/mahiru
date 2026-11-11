@@ -1,22 +1,70 @@
--- RoChess! AI v2.0 - Full Auto-Play & Opponent Blunder Punisher
--- Tự động nhận diện màu quân, chống trôi lịch sử khi cuộn, tự đánh từ đầu tới cuối
+-- RoChess! AI v4.0 - Native VortexBot + Stockfish 16 + Direct Board Hook
+-- Language: Luau | Runtime: Roblox Client Executor (Delta / Fluxus / Codex)
 
-local HttpService = game:GetService("HttpService")
+-- 1. DỌN SẠCH CÁC BẢN CŨ ĐANG CHẠY NGẦM TRONG BỘ NHỚ (v1, v2, v3)
+if _G.__RoChessAI_Cleanup then
+    pcall(_G.__RoChessAI_Cleanup)
+end
+_G.__BestMoveAutoPlay = false
+
 local Players = game:GetService("Players")
-local GuiService = game:GetService("GuiService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
--- Cấu hình mặc định: Tự chơi 100% từ đầu đến cuối
-local Config = {
+local ParentGui = (gethui and gethui()) or game:GetService("CoreGui")
+for _, guiName in ipairs({"RoChessAI_Overlay", "RoChessAI_v2", "RoChessAI_v3", "RoChessAI_v4"}) do
+    local old1 = ParentGui:FindFirstChild(guiName)
+    if old1 then old1:Destroy() end
+    local old2 = PlayerGui:FindFirstChild(guiName)
+    if old2 then old2:Destroy() end
+end
+
+-- Xóa các khung HUD cũ còn sót lại theo Text nếu đổi tên
+for _, container in ipairs({ParentGui, PlayerGui}) do
+    for _, obj in ipairs(container:GetDescendants()) do
+        if obj:IsA("TextLabel") and (string.find(obj.Text or "", "RoChess AI") or string.find(obj.Text or "", "Blunder Detector")) then
+            local screen = obj:FindFirstAncestorOfClass("ScreenGui")
+            if screen then pcall(function() screen:Destroy() end) end
+        end
+    end
+end
+
+-- 2. NẠP TRỰC TIẾP CÁC MODULE NỘI BỘ CỦA ROCHESS!
+local ChessFolder = ReplicatedStorage:WaitForChild("Chess", 10)
+local ClientFolder = ReplicatedStorage:WaitForChild("ChessClient", 10)
+assert(ChessFolder and ClientFolder, "[RoChess AI v4] Không tìm thấy ReplicatedStorage.Chess / ChessClient!")
+
+local Engine = require(ChessFolder:WaitForChild("Engine"))
+local Bot = require(ChessFolder:WaitForChild("Bot"))
+local VortexBot = ChessFolder:FindFirstChild("VortexBot") and require(ChessFolder.VortexBot) or nil
+local App = require(ClientFolder:WaitForChild("App"))
+
+-- Bảng mã quân phong cấp của Engine RoChess (Queen=5, Rook=4, Bishop=3, Knight=2)
+local PROMO_CODE = { q = 5, r = 4, b = 3, n = 2 }
+
+local CFG = {
     AutoPlay = true,
-    SearchDepth = 14,
-    MoveDelayMin = 0.35,
-    MoveDelayMax = 0.75,
-    RetryInterval = 1.15
+    DrawArrow = true,
+    ThinkSeconds = 0.85,
+    MaxDepth = 16,
+    MoveDelayMin = 0.18,
+    MoveDelayMax = 0.42,
+    CloudTimeout = 1.15
 }
 
+local Running = true
+_G.__RoChessAI_Cleanup = function()
+    Running = false
+    pcall(function()
+        if App.board and typeof(App.board.setArrow) == "function" then
+            App.board:setArrow("hint", nil)
+        end
+    end)
+end
+
+-- 3. BỘ DỰNG FEN TỪ LỊCH SỬ UCI CỦA SESSION (PHỤC VỤ CLOUD STOCKFISH/LICHESS)
 local Files = {"a", "b", "c", "d", "e", "f", "g", "h"}
 local FileMap = {a=1, b=2, c=3, d=4, e=5, f=6, g=7, h=8}
 
@@ -31,328 +79,72 @@ local function RCToSq(r, c)
     return Files[c] .. tostring(9 - r)
 end
 
--- =====================================================
--- 1. BỘ MÁY LUẬT CỜ VUA & SINH NƯỚC ĐI HỢP LỆ (LEGAL MOVES)
--- =====================================================
-local function NewBoard()
-    return {
-        {"r","n","b","q","k","b","n","r"},
-        {"p","p","p","p","p","p","p","p"},
-        {".",".",".",".",".",".",".","."},
-        {".",".",".",".",".",".",".","."},
-        {".",".",".",".",".",".",".","."},
-        {".",".",".",".",".",".",".","."},
-        {"P","P","P","P","P","P","P","P"},
-        {"R","N","B","Q","K","B","N","R"}
-    }
-end
+local function BuildFEN(startFen, ucis)
+    local fenStr = startFen or "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    local parts = string.split(fenStr, " ")
+    local rowsRaw = string.split(parts[1], "/")
+    local board = {}
 
-local function CloneBoard(b)
-    local nb = {}
     for r = 1, 8 do
-        nb[r] = {}
-        for c = 1, 8 do nb[r][c] = b[r][c] end
-    end
-    return nb
-end
-
-local function IsWhitePiece(p)
-    return p ~= "." and string.upper(p) == p
-end
-
-local function IsColorPiece(p, isWhite)
-    if p == "." then return false end
-    return isWhite == IsWhitePiece(p)
-end
-
-local function FindKing(board, isWhite)
-    local k = isWhite and "K" or "k"
-    for r = 1, 8 do
-        for c = 1, 8 do
-            if board[r][c] == k then return r, c end
-        end
-    end
-    return nil, nil
-end
-
-local function IsSquareAttacked(board, tr, tc, byWhite)
-    -- Tốt tấn công
-    local pawnDir = byWhite and 1 or -1 -- Hàng xuất phát của tốt tấn công tới tr
-    local pawnChar = byWhite and "P" or "p"
-    local pr = tr + pawnDir
-    if pr >= 1 and pr <= 8 then
-        if tc - 1 >= 1 and board[pr][tc - 1] == pawnChar then return true end
-        if tc + 1 <= 8 and board[pr][tc + 1] == pawnChar then return true end
-    end
-
-    -- Mã tấn công
-    local knightChar = byWhite and "N" or "n"
-    local kMoves = {{-2,-1},{-2,1},{-1,-2},{-1,2},{1,-2},{1,2},{2,-1},{2,1}}
-    for _, m in ipairs(kMoves) do
-        local r, c = tr + m[1], tc + m[2]
-        if r >= 1 and r <= 8 and c >= 1 and c <= 8 and board[r][c] == knightChar then
-            return true
-        end
-    end
-
-    -- Vua tấn công
-    local kingChar = byWhite and "K" or "k"
-    for dr = -1, 1 do
-        for dc = -1, 1 do
-            if dr ~= 0 or dc ~= 0 then
-                local r, c = tr + dr, tc + dc
-                if r >= 1 and r <= 8 and c >= 1 and c <= 8 and board[r][c] == kingChar then
-                    return true
-                end
+        board[r] = {}
+        local col = 1
+        local rStr = rowsRaw[r] or "8"
+        for i = 1, #rStr do
+            local ch = string.sub(rStr, i, i)
+            local n = tonumber(ch)
+            if n then
+                for _ = 1, n do board[r][col] = "."; col = col + 1 end
+            else
+                board[r][col] = ch; col = col + 1
             end
         end
     end
 
-    -- Xe / Hậu (ngang dọc)
-    local rookChar = byWhite and "R" or "r"
-    local queenChar = byWhite and "Q" or "q"
-    local ortho = {{-1,0},{1,0},{0,-1},{0,1}}
-    for _, d in ipairs(ortho) do
-        local r, c = tr + d[1], tc + d[2]
-        while r >= 1 and r <= 8 and c >= 1 and c <= 8 do
-            local p = board[r][c]
-            if p ~= "." then
-                if p == rookChar or p == queenChar then return true end
-                break
+    local whiteTurn = (parts[2] ~= "b")
+    local castling = parts[3] or "KQkq"
+    local epSquare = parts[4] or "-"
+
+    for _, uci in ipairs(ucis or {}) do
+        local fromSq = string.sub(uci, 1, 2)
+        local toSq = string.sub(uci, 3, 4)
+        local promo = string.sub(uci, 5, 5)
+        local fr, fc = SqToRC(fromSq)
+        local tr, tc = SqToRC(toSq)
+
+        if fr and tr then
+            local p = board[fr][fc]
+            local pu = string.upper(p)
+            local isW = (p ~= "." and pu == p)
+
+            if pu == "P" and fc ~= tc and board[tr][tc] == "." then
+                board[fr][tc] = "."
             end
-            r, c = r + d[1], c + d[2]
-        end
-    end
-
-    -- Tượng / Hậu (chéo)
-    local bishopChar = byWhite and "B" or "b"
-    local diag = {{-1,-1},{-1,1},{1,-1},{1,1}}
-    for _, d in ipairs(diag) do
-        local r, c = tr + d[1], tc + d[2]
-        while r >= 1 and r <= 8 and c >= 1 and c <= 8 do
-            local p = board[r][c]
-            if p ~= "." then
-                if p == bishopChar or p == queenChar then return true end
-                break
+            if pu == "K" and math.abs(tc - fc) == 2 then
+                if tc == 7 then board[fr][6] = board[fr][8]; board[fr][8] = "."
+                elseif tc == 3 then board[fr][4] = board[fr][1]; board[fr][1] = "." end
             end
-            r, c = r + d[1], c + d[2]
-        end
-    end
 
-    return false
-end
+            if pu == "K" then
+                castling = isW and string.gsub(castling, "[KQ]", "") or string.gsub(castling, "[kq]", "")
+            end
+            if fromSq == "a1" or toSq == "a1" then castling = string.gsub(castling, "Q", "") end
+            if fromSq == "h1" or toSq == "h1" then castling = string.gsub(castling, "K", "") end
+            if fromSq == "a8" or toSq == "a8" then castling = string.gsub(castling, "q", "") end
+            if fromSq == "h8" or toSq == "h8" then castling = string.gsub(castling, "k", "") end
+            if castling == "" then castling = "-" end
 
-local function MakeRawMove(board, fr, fc, tr, tc, promo)
-    local nb = CloneBoard(board)
-    local piece = nb[fr][fc]
-    local pUpper = string.upper(piece)
-    local isW = IsWhitePiece(piece)
-
-    -- Bắt tốt qua đường
-    if pUpper == "P" and fc ~= tc and nb[tr][tc] == "." then
-        nb[fr][tc] = "."
-    end
-
-    -- Nhập thành
-    if pUpper == "K" and math.abs(tc - fc) == 2 then
-        if tc == 7 then
-            nb[fr][6] = nb[fr][8]
-            nb[fr][8] = "."
-        elseif tc == 3 then
-            nb[fr][4] = nb[fr][1]
-            nb[fr][1] = "."
-        end
-    end
-
-    nb[fr][fc] = "."
-    if promo then
-        nb[tr][tc] = isW and string.upper(promo) or string.lower(promo)
-    elseif pUpper == "P" and (tr == 1 or tr == 8) then
-        nb[tr][tc] = isW and "Q" or "q"
-    else
-        nb[tr][tc] = piece
-    end
-    return nb
-end
-
-local function GenerateLegalMoves(board, isWhite, epSquare)
-    local moves = {}
-    for r = 1, 8 do
-        for c = 1, 8 do
-            local p = board[r][c]
-            if IsColorPiece(p, isWhite) then
-                local pu = string.upper(p)
-                local rawTargets = {}
-
-                if pu == "P" then
-                    local dir = isWhite and -1 or 1
-                    local startRank = isWhite and 7 or 2
-                    local nr = r + dir
-                    if nr >= 1 and nr <= 8 then
-                        if board[nr][c] == "." then
-                            table.insert(rawTargets, {nr, c})
-                            if r == startRank and board[r + 2 * dir][c] == "." then
-                                table.insert(rawTargets, {r + 2 * dir, c})
-                            end
-                        end
-                        for _, dc in ipairs({-1, 1}) do
-                            local nc = c + dc
-                            if nc >= 1 and nc <= 8 then
-                                local tp = board[nr][nc]
-                                if (tp ~= "." and not IsColorPiece(tp, isWhite)) or (epSquare and RCToSq(nr, nc) == epSquare) then
-                                    table.insert(rawTargets, {nr, nc})
-                                end
-                            end
-                        end
-                    end
-                elseif pu == "N" then
-                    for _, m in ipairs({{-2,-1},{-2,1},{-1,-2},{-1,2},{1,-2},{1,2},{2,-1},{2,1}}) do
-                        local nr, nc = r + m[1], c + m[2]
-                        if nr >= 1 and nr <= 8 and nc >= 1 and nc <= 8 and not IsColorPiece(board[nr][nc], isWhite) then
-                            table.insert(rawTargets, {nr, nc})
-                        end
-                    end
-                elseif pu == "K" then
-                    for dr = -1, 1 do
-                        for dc = -1, 1 do
-                            if dr ~= 0 or dc ~= 0 then
-                                local nr, nc = r + dr, c + dc
-                                if nr >= 1 and nr <= 8 and nc >= 1 and nc <= 8 and not IsColorPiece(board[nr][nc], isWhite) then
-                                    table.insert(rawTargets, {nr, nc})
-                                end
-                            end
-                        end
-                    end
-                    -- Nhập thành
-                    local homeRow = isWhite and 8 or 1
-                    local rookChar = isWhite and "R" or "r"
-                    if r == homeRow and c == 5 and not IsSquareAttacked(board, homeRow, 5, not isWhite) then
-                        if board[homeRow][8] == rookChar and board[homeRow][6] == "." and board[homeRow][7] == "." then
-                            if not IsSquareAttacked(board, homeRow, 6, not isWhite) and not IsSquareAttacked(board, homeRow, 7, not isWhite) then
-                                table.insert(rawTargets, {homeRow, 7})
-                            end
-                        end
-                        if board[homeRow][1] == rookChar and board[homeRow][2] == "." and board[homeRow][3] == "." and board[homeRow][4] == "." then
-                            if not IsSquareAttacked(board, homeRow, 4, not isWhite) and not IsSquareAttacked(board, homeRow, 3, not isWhite) then
-                                table.insert(rawTargets, {homeRow, 3})
-                            end
-                        end
-                    end
-                else
-                    local dirs = {}
-                    if pu == "R" or pu == "Q" then
-                        for _, d in ipairs({{-1,0},{1,0},{0,-1},{0,1}}) do table.insert(dirs, d) end
-                    end
-                    if pu == "B" or pu == "Q" then
-                        for _, d in ipairs({{-1,-1},{-1,1},{1,-1},{1,1}}) do table.insert(dirs, d) end
-                    end
-                    for _, d in ipairs(dirs) do
-                        local nr, nc = r + d[1], c + d[2]
-                        while nr >= 1 and nr <= 8 and nc >= 1 and nc <= 8 do
-                            local tp = board[nr][nc]
-                            if tp == "." then
-                                table.insert(rawTargets, {nr, nc})
-                            else
-                                if not IsColorPiece(tp, isWhite) then
-                                    table.insert(rawTargets, {nr, nc})
-                                end
-                                break
-                            end
-                            nr, nc = nr + d[1], nc + d[2]
-                        end
-                    end
-                end
-
-                for _, tgt in ipairs(rawTargets) do
-                    local tr, tc = tgt[1], tgt[2]
-                    local nb = MakeRawMove(board, r, c, tr, tc, nil)
-                    local kr, kc = FindKing(nb, isWhite)
-                    if kr and not IsSquareAttacked(nb, kr, kc, not isWhite) then
-                        local uci = RCToSq(r, c) .. RCToSq(tr, tc)
-                        if pu == "P" and (tr == 1 or tr == 8) then
-                            uci = uci .. "q"
-                        end
-                        table.insert(moves, {
-                            fr = r, fc = c, tr = tr, tc = tc,
-                            piece = pu, uci = uci,
-                            isCapture = (board[tr][tc] ~= ".") or (pu == "P" and c ~= tc)
-                        })
-                    end
-                end
+            epSquare = (pu == "P" and math.abs(tr - fr) == 2) and RCToSq((fr + tr) / 2, fc) or "-"
+            board[fr][fc] = "."
+            if promo and promo ~= "" then
+                board[tr][tc] = isW and string.upper(promo) or string.lower(promo)
+            else
+                board[tr][tc] = p
             end
         end
-    end
-    return moves
-end
-
--- Khớp ký hiệu SAN (VD: "e4", "exd5", "Nf3", "Ne5+", "Bxc6+") với danh sách nước đi hợp lệ
-local function ApplyValidatedSAN(board, san, isWhite, epSquare)
-    local clean = string.gsub(san, "[+#!?%s]", "")
-    local legalMoves = GenerateLegalMoves(board, isWhite, epSquare)
-
-    if clean == "O-O" or clean == "0-0" then
-        for _, m in ipairs(legalMoves) do
-            if m.piece == "K" and m.tc == 7 then
-                return MakeRawMove(board, m.fr, m.fc, m.tr, m.tc, nil), nil, true
-            end
-        end
-        return board, nil, false
-    elseif clean == "O-O-O" or clean == "0-0-0" then
-        for _, m in ipairs(legalMoves) do
-            if m.piece == "K" and m.tc == 3 then
-                return MakeRawMove(board, m.fr, m.fc, m.tr, m.tc, nil), nil, true
-            end
-        end
-        return board, nil, false
+        whiteTurn = not whiteTurn
     end
 
-    local promo = nil
-    local eqIdx = string.find(clean, "=")
-    if eqIdx then
-        promo = string.sub(clean, eqIdx + 1, eqIdx + 1)
-        clean = string.sub(clean, 1, eqIdx - 1)
-    end
-
-    local targetSq = string.sub(clean, -2)
-    local tr, tc = SqToRC(targetSq)
-    if not tr or not tc then return board, nil, false end
-
-    local firstChar = string.sub(clean, 1, 1)
-    local pieceType = "P"
-    local disambig = ""
-
-    if string.match(firstChar, "[NBRQK]") then
-        pieceType = firstChar
-        disambig = string.gsub(string.sub(clean, 2, -3), "x", "")
-    else
-        pieceType = "P"
-        disambig = string.gsub(string.sub(clean, 1, -3), "x", "")
-    end
-
-    for _, m in ipairs(legalMoves) do
-        if m.piece == pieceType and m.tr == tr and m.tc == tc then
-            local ok = true
-            if #disambig > 0 then
-                local df = string.match(disambig, "[a-h]")
-                local dr = string.match(disambig, "[1-8]")
-                if df and FileMap[df] ~= m.fc then ok = false end
-                if dr and (9 - tonumber(dr)) ~= m.fr then ok = false end
-            end
-            if ok then
-                local newEp = nil
-                if pieceType == "P" and math.abs(m.tr - m.fr) == 2 then
-                    newEp = RCToSq((m.fr + m.tr) / 2, m.fc)
-                end
-                return MakeRawMove(board, m.fr, m.fc, m.tr, m.tc, promo), newEp, true
-            end
-        end
-    end
-
-    return board, nil, false
-end
-
-local function BoardToFEN(board, activeColor, epSquare, fullMove)
-    local rows = {}
+    local outRows = {}
     for r = 1, 8 do
         local empty = 0
         local s = ""
@@ -366,533 +158,295 @@ local function BoardToFEN(board, activeColor, epSquare, fullMove)
             end
         end
         if empty > 0 then s = s .. tostring(empty) end
-        table.insert(rows, s)
+        table.insert(outRows, s)
     end
 
-    local castling = ""
-    if board[8][5] == "K" then
-        if board[8][8] == "R" then castling = castling .. "K" end
-        if board[8][1] == "R" then castling = castling .. "Q" end
-    end
-    if board[1][5] == "k" then
-        if board[1][8] == "r" then castling = castling .. "k" end
-        if board[1][1] == "r" then castling = castling .. "q" end
-    end
-    if castling == "" then castling = "-" end
-
-    return string.format("%s %s %s %s 0 %d", table.concat(rows, "/"), activeColor, castling, epSquare or "-", fullMove or 1)
+    local side = whiteTurn and "w" or "b"
+    local fullMove = math.floor(#(ucis or {}) / 2) + 1
+    return string.format("%s %s %s %s 0 %d", table.concat(outRows, "/"), side, castling, epSquare, fullMove)
 end
 
--- =====================================================
--- 2. NHẬN DIỆN BÀN CỜ, MÀU QUÂN & CLICK CHÍNH XÁC 100%
--- =====================================================
-local function DetectBoardAndOrientation()
-    local bestBoard = nil
-    local bestScore = 0
-    local rank1Y, rank8Y = nil, nil
-
-    for _, obj in ipairs(PlayerGui:GetDescendants()) do
-        if obj:IsA("GuiObject") and obj.Visible then
-            local sz = obj.AbsoluteSize
-            local pos = obj.AbsolutePosition
-            -- Khung bàn cờ của RoChess là hình vuông lớn nằm ở nửa trên màn hình
-            if sz.X >= 240 and sz.X <= 750 and math.abs(sz.X - sz.Y) <= 16 and pos.Y >= 30 and pos.Y <= 250 then
-                local childCount = #obj:GetDescendants()
-                if childCount > bestScore then
-                    bestScore = childCount
-                    bestBoard = obj
-                end
-            end
-        end
-    end
-
-    -- Quét nhãn tọa độ 1 và 8 trên bàn cờ để tự động biết cầm Trắng hay Đen
-    local searchRoot = bestBoard or PlayerGui
-    for _, lbl in ipairs(searchRoot:GetDescendants()) do
-        if lbl:IsA("TextLabel") and lbl.Visible then
-            local t = string.gsub(lbl.Text or "", "%s+", "")
-            local y = lbl.AbsolutePosition.Y
-            local x = lbl.AbsolutePosition.X
-            if y >= 50 and y <= 520 and x <= 120 then
-                if t == "1" then rank1Y = y end
-                if t == "8" then rank8Y = y end
-            end
-        end
-    end
-
-    local playerColor = "w"
-    if rank1Y and rank8Y then
-        -- Nếu số 8 nằm thấp hơn số 1 (Y lớn hơn) -> Bàn cờ đang xoay về phía quân Đen
-        playerColor = (rank8Y > rank1Y) and "b" or "w"
-    end
-
-    return bestBoard, playerColor
-end
-
--- Click đa tầng: Gọi cả sự kiện GuiButton + Touch Mobile + Mouse Click tại tâm ô cờ
-local function FireSquareClick(screenX, screenY, boardFrame)
-    -- 1. Kích hoạt trực tiếp tín hiệu GuiObject tại tọa độ đó nếu Executor hỗ trợ
-    if getconnections then
-        local guiObjs = PlayerGui:GetGuiObjectsAtPosition(screenX, screenY)
-        for _, g in ipairs(guiObjs) do
-            if not g:IsDescendantOf( (gethui and gethui()) or game:GetService("CoreGui") ) then
-                for _, sigName in ipairs({"MouseButton1Click", "MouseButton1Down", "MouseButton1Up", "Activated"}) do
-                    local ok, sig = pcall(function() return g[sigName] end)
-                    if ok and sig then
-                        for _, conn in ipairs(getconnections(sig)) do
-                            pcall(function() conn:Fire() end)
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- 2. Gửi sự kiện click chuột & chạm màn hình chính xác vào tâm ô cờ
-    local inset = GuiService:GetGuiInset()
-    local vx, vy = screenX, screenY + inset.Y
-
-    pcall(function()
-        VirtualInputManager:SendMouseButtonEvent(vx, vy, 0, true, game, 1)
-        task.wait(0.04)
-        VirtualInputManager:SendMouseButtonEvent(vx, vy, 0, false, game, 1)
-    end)
-
-    pcall(function()
-        VirtualInputManager:SendTouchEvent(0, 0, vx, vy)
-        task.wait(0.04)
-        VirtualInputManager:SendTouchEvent(0, 2, vx, vy)
-    end)
-end
-
-local function GetSquareScreenPosition(sq, boardFrame, playerColor)
-    local r, c = SqToRC(sq) -- r: 1(rank 8)..8(rank 1), c: 1(file a)..8(file h)
-    if not r or not c or not boardFrame then return nil, nil end
-
-    -- Nếu tìm được trực tiếp GuiObject mang tên ô (a1..h8) thì lấy tâm của nó
-    for _, obj in ipairs(boardFrame:GetDescendants()) do
-        if obj:IsA("GuiObject") and obj.Visible and string.lower(obj.Name) == sq then
-            return obj.AbsolutePosition.X + obj.AbsoluteSize.X / 2,
-                   obj.AbsolutePosition.Y + obj.AbsoluteSize.Y / 2
-        end
-    end
-
-    -- Tính toán hình học 8x8 dựa theo chiều bàn cờ (Trắng hoặc Đen)
-    local visualRow, visualCol
-    if playerColor == "w" then
-        visualRow = r
-        visualCol = c
-    else
-        visualRow = 9 - r
-        visualCol = 9 - c
-    end
-
-    local bPos = boardFrame.AbsolutePosition
-    local bSize = boardFrame.AbsoluteSize
-    local tileW = bSize.X / 8
-    local tileH = bSize.Y / 8
-
-    local centerX = bPos.X + (visualCol - 0.5) * tileW
-    local centerY = bPos.Y + (visualRow - 0.5) * tileH
-    return centerX, centerY
-end
-
-local function ExecuteMoveOnBoard(uciMove, playerColor)
-    if not uciMove or #uciMove < 4 then return false end
-    local boardFrame, detectedColor = DetectBoardAndOrientation()
-    if not boardFrame then return false end
-    playerColor = detectedColor or playerColor
-
-    local fromSq = string.sub(uciMove, 1, 2)
-    local toSq = string.sub(uciMove, 3, 4)
-
-    local fx, fy = GetSquareScreenPosition(fromSq, boardFrame, playerColor)
-    local tx, ty = GetSquareScreenPosition(toSq, boardFrame, playerColor)
-
-    if fx and fy and tx and ty then
-        FireSquareClick(fx, fy, boardFrame)
-        task.wait(0.14)
-        FireSquareClick(tx, ty, boardFrame)
-
-        -- Nếu là nước phong cấp (VD: e7e8q), click thêm lần nữa vào ô đích để chọn Hậu
-        if #uciMove == 5 then
-            task.wait(0.18)
-            FireSquareClick(tx, ty, boardFrame)
-        end
-        return true
-    end
-    return false
-end
-
--- =====================================================
--- 3. BỘ ĐỌC LỊCH SỬ NƯỚC ĐI CHỐNG TRÔI KHI CUỘN (SCROLL-SAFE)
--- =====================================================
-local PersistentMoves = {} -- Lưu trữ theo số thứ tự ply: PersistentMoves[1] = "e4", [2] = "d5", ...
-
-local function IsValidSANToken(txt)
-    if txt == "O-O" or txt == "O-O-O" or txt == "0-0" or txt == "0-0-0" then return true end
-    return string.match(txt, "^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8][=]?[NBRQ]?[+#!?]*$") ~= nil
-end
-
-local function UpdateMoveHistoryFromUI()
-    local turnNumbers = {}
-    local moveTokens = {}
-
-    for _, obj in ipairs(PlayerGui:GetDescendants()) do
-        if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and obj.Visible then
-            local txt = string.gsub(obj.Text or "", "^%s*(.-)%s*$", "%1")
-            local pos = obj.AbsolutePosition
-            local sz = obj.AbsoluteSize
-
-            -- Khu vực bảng lịch sử nước đi nằm bên dưới bàn cờ (Y > 420)
-            if pos.Y > 420 and sz.Y >= 10 and sz.Y <= 60 then
-                local numMatch = string.match(txt, "^(%d+)%.$")
-                if numMatch then
-                    table.insert(turnNumbers, {
-                        turn = tonumber(numMatch),
-                        y = pos.Y,
-                        x = pos.X
-                    })
-                elseif IsValidSANToken(txt) and sz.X > 16 then
-                    table.insert(moveTokens, {
-                        san = txt,
-                        y = pos.Y,
-                        x = pos.X
-                    })
-                end
-            end
-        end
-    end
-
-    -- Nếu không có bất kỳ nước đi nào trên UI (Ván mới bắt đầu) -> Xóa bộ nhớ cũ
-    if #moveTokens == 0 then
-        if #PersistentMoves > 0 then
-            table.clear(PersistentMoves)
-        end
-        return PersistentMoves
-    end
-
-    -- Ghép từng nước đi (Trắng cột trái, Đen cột phải) vào đúng dòng số thứ tự lượt (1., 2., 3. ...)
-    if #turnNumbers > 0 then
-        table.sort(turnNumbers, function(a, b) return a.turn < b.turn end)
-
-        -- Nếu trên UI chỉ có "1." và chỉ có 1 nước đi -> Reset ván mới
-        if #turnNumbers == 1 and turnNumbers[1].turn == 1 and #moveTokens <= 2 and #PersistentMoves > 2 then
-            table.clear(PersistentMoves)
-        end
-
-        for _, tInfo in ipairs(turnNumbers) do
-            local rowMoves = {}
-            for _, m in ipairs(moveTokens) do
-                if math.abs(m.y - tInfo.y) <= 14 and m.x > tInfo.x then
-                    table.insert(rowMoves, m)
-                end
-            end
-            table.sort(rowMoves, function(a, b) return a.x < b.x end)
-
-            local whitePly = (tInfo.turn - 1) * 2 + 1
-            local blackPly = whitePly + 1
-
-            if rowMoves[1] then
-                PersistentMoves[whitePly] = rowMoves[1].san
-            end
-            if rowMoves[2] then
-                PersistentMoves[blackPly] = rowMoves[2].san
-            elseif PersistentMoves[blackPly] and tInfo.turn == turnNumbers[#turnNumbers].turn then
-                PersistentMoves[blackPly] = nil
-            end
-        end
-    else
-        -- Dự phòng nếu không tìm thấy nhãn số thứ tự lượt
-        table.sort(moveTokens, function(a, b)
-            if math.abs(a.y - b.y) > 10 then return a.y < b.y end
-            return a.x < b.x
-        end)
-        for i, m in ipairs(moveTokens) do
-            PersistentMoves[i] = m.san
-        end
-    end
-
-    -- Chuẩn hóa mảng liên tục 1..N
-    local cleanList = {}
-    local idx = 1
-    while PersistentMoves[idx] do
-        table.insert(cleanList, PersistentMoves[idx])
-        idx = idx + 1
-    end
-    return cleanList
-end
-
--- =====================================================
--- 4. TRÍ TUỆ NHÂN TẠO KÉP: STOCKFISH 16 + MINIMAX NỘI BỘ
--- =====================================================
+-- 4. HỆ THỐNG AI ĐA LÕI: VORTEXBOT + BOT.ANALYSE + STOCKFISH 16 CLOUD (NON-BLOCKING)
 local httpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
 
-local PieceScore = {
-    P = 100, N = 320, B = 335, R = 500, Q = 920, K = 20000,
-    p = -100, n = -320, b = -335, r = -500, q = -920, k = -20000
-}
+local function FetchCloudMoveAsync(fen, depth, timeoutSec)
+    local done = false
+    local resultMove, resultScore, resultMate, resultSource = nil, 0, nil, nil
 
--- Bảng điểm vị trí trung tâm giúp AI nội bộ đánh cực kỳ chủ động
-local function EvaluateBoardLocal(board)
-    local score = 0
-    for r = 1, 8 do
-        for c = 1, 8 do
-            local p = board[r][c]
-            if p ~= "." then
-                score = score + (PieceScore[p] or 0)
-                local centerBonus = (4 - math.abs(4.5 - r)) * 6 + (4 - math.abs(4.5 - c)) * 6
-                if IsWhitePiece(p) then
-                    score = score + centerBonus
-                else
-                    score = score - centerBonus
+    task.spawn(function()
+        local enc = HttpService:UrlEncode(fen)
+        local url = string.format("https://stockfish.online/api/s/v2.php?fen=%s&depth=%d", enc, math.min(depth, 15))
+        local ok, body = pcall(function()
+            if httpRequest then
+                local r = httpRequest({Url = url, Method = "GET"})
+                return r and r.Body
+            end
+            return game:HttpGet(url)
+        end)
+        if not done and ok and body then
+            local decOk, data = pcall(function() return HttpService:JSONDecode(body) end)
+            if decOk and data and data.success and data.bestmove then
+                local m = string.match(data.bestmove, "bestmove%s+([a-h][1-8][a-h][1-8][qrbn]?)")
+                if m then
+                    resultMove = m
+                    resultScore = tonumber(data.evaluation) or 0
+                    resultMate = data.mate
+                    resultSource = "Stockfish 16"
+                    done = true
                 end
             end
         end
-    end
-    return score
-end
-
--- AI dự phòng nội bộ (Alpha-Beta Pruning) đảm bảo luôn có nước đi hợp lệ ngay lập tức
-local function GetLocalBestMove(board, isWhite, epSquare)
-    local legal = GenerateLegalMoves(board, isWhite, epSquare)
-    if #legal == 0 then return nil, 0 end
-
-    -- Ưu tiên xét các nước ăn quân trước
-    table.sort(legal, function(a, b)
-        return (a.isCapture and 1 or 0) > (b.isCapture and 1 or 0)
     end)
 
-    local bestMove = legal[1].uci
-    local bestVal = isWhite and -999999 or 999999
-
-    for _, m in ipairs(legal) do
-        local nb = MakeRawMove(board, m.fr, m.fc, m.tr, m.tc, nil)
-        local oppMoves = GenerateLegalMoves(nb, not isWhite, nil)
-        local worstReply = isWhite and 999999 or -999999
-
-        if #oppMoves == 0 then
-            local kr, kc = FindKing(nb, not isWhite)
-            if kr and IsSquareAttacked(nb, kr, kc, isWhite) then
-                return m.uci, isWhite and 99.0 or -99.0 -- Nước chiếu hết ngay lập tức!
-            end
-            worstReply = 0
-        else
-            for _, om in ipairs(oppMoves) do
-                local nb2 = MakeRawMove(nb, om.fr, om.fc, om.tr, om.tc, nil)
-                local eval = EvaluateBoardLocal(nb2)
-                if isWhite then
-                    if eval < worstReply then worstReply = eval end
-                else
-                    if eval > worstReply then worstReply = eval end
-                end
-            end
-        end
-
-        if isWhite then
-            if worstReply > bestVal then
-                bestVal = worstReply
-                bestMove = m.uci
-            end
-        else
-            if worstReply < bestVal then
-                bestVal = worstReply
-                bestMove = m.uci
-            end
-        end
+    local t0 = os.clock()
+    while not done and (os.clock() - t0) < timeoutSec do
+        task.wait(0.03)
     end
-
-    return bestMove, bestVal / 100
+    done = true
+    return resultMove, resultScore, resultMate, resultSource
 end
 
-local function GetBestMoveAI(board, isWhite, epSquare, fullMove)
-    local activeColor = isWhite and "w" or "b"
-    local fen = BoardToFEN(board, activeColor, epSquare, fullMove)
-    local legalMoves = GenerateLegalMoves(board, isWhite, epSquare)
-    local legalSet = {}
-    for _, m in ipairs(legalMoves) do
-        legalSet[string.sub(m.uci, 1, 4)] = m.uci
+local function ComputeBestMove(session)
+    local startFen = session.startFen or "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    local moves = table.clone(session.ucis or {})
+
+    -- Ưu tiên 1: VortexBot.analyse (Server Engine Bridge của RoChess - Chuẩn 100% luật game, trả về res.best)
+    if VortexBot and typeof(VortexBot.analyse) == "function" then
+        local ok, res = pcall(VortexBot.analyse, startFen, moves, CFG.ThinkSeconds, CFG.MaxDepth)
+        if ok and type(res) == "table" and type(res.best) == "string" and #res.best >= 4 then
+            local cpScore = (tonumber(res.score) or 0) / 100
+            local d = tonumber(res.depth) or CFG.MaxDepth
+            return res.best, cpScore, res.mate, string.format("VortexBot D%d", d)
+        end
     end
 
-    -- 1. Truy vấn Stockfish 16 Cloud API
-    local url = string.format("https://stockfish.online/api/s/v2.php?fen=%s&depth=%d", HttpService:UrlEncode(fen), Config.SearchDepth)
-    local ok, body = pcall(function()
-        if httpRequest then
-            local res = httpRequest({Url = url, Method = "GET"})
-            return res and res.Body
+    -- Ưu tiên 2: Stockfish 16 Cloud (Có giới hạn timeout 1.15s để không bao giờ treo máy)
+    local fen = BuildFEN(startFen, moves)
+    local sfMove, sfScore, sfMate, sfSrc = FetchCloudMoveAsync(fen, 14, CFG.CloudTimeout)
+    if sfMove then
+        return sfMove, sfScore, sfMate, sfSrc
+    end
+
+    -- Ưu tiên 3: Bot.analyse nội bộ của RoChess (Trả về res.best ngay cả khi mất mạng)
+    if Bot and typeof(Bot.analyse) == "function" then
+        local ok, res = pcall(Bot.analyse, startFen, moves, CFG.ThinkSeconds, CFG.MaxDepth)
+        if ok and type(res) == "table" and type(res.best) == "string" and #res.best >= 4 then
+            local cpScore = (tonumber(res.score) or 0) / 100
+            local d = tonumber(res.depth) or CFG.MaxDepth
+            return res.best, cpScore, res.mate, string.format("RoChess Engine D%d", d)
         end
-        return game:HttpGet(url)
+    end
+
+    -- Ưu tiên 4: VortexBot.think / Bot.think trực tiếp
+    if VortexBot and typeof(VortexBot.think) == "function" then
+        local ok, uci = pcall(VortexBot.think, startFen, moves, CFG.ThinkSeconds, CFG.MaxDepth)
+        if ok and type(uci) == "string" and #uci >= 4 then
+            return uci, 0, nil, "VortexBot Think"
+        end
+    end
+    if Bot and typeof(Bot.think) == "function" then
+        local ok, uci = pcall(Bot.think, startFen, moves, CFG.ThinkSeconds, CFG.MaxDepth)
+        if ok and type(uci) == "string" and #uci >= 4 then
+            return uci, 0, nil, "RoChess Think"
+        end
+    end
+
+    return nil, 0, nil, "None"
+end
+
+-- 5. VẼ MŨI TÊN ESP TRÊN BÀN CỜ & ĐI QUÂN TRỰC TIẾP QUA MODULE ROCHESS
+local function DrawBoardArrow(uci)
+    if not CFG.DrawArrow or not uci or #uci < 4 then return end
+    pcall(function()
+        if App.board and typeof(App.board.setArrow) == "function" then
+            local fromIdx = Engine.algToIndex64(string.sub(uci, 1, 2))
+            local toIdx = Engine.algToIndex64(string.sub(uci, 3, 4))
+            if fromIdx and toIdx then
+                App.board:setArrow("hint", fromIdx, toIdx, Color3.fromRGB(45, 235, 115), 0.15)
+            end
+        end
+    end)
+end
+
+local function ExecuteMoveNative(session, uci)
+    if not session or not uci or #uci < 4 then return false end
+    local beforePly = #(session.ucis or {})
+
+    -- Đồng bộ viewPly về nước hiện tại nếu đang xem lại lịch sử
+    pcall(function()
+        if session.viewPly and session.viewPly ~= beforePly then
+            session.viewPly = beforePly
+        end
     end)
 
-    if ok and body then
-        local decOk, data = pcall(function() return HttpService:JSONDecode(body) end)
-        if decOk and data and data.success and data.bestmove then
-            local rawUCI = string.match(data.bestmove, "bestmove%s+([a-h][1-8][a-h][1-8][qrbn]?)")
-            if rawUCI then
-                local base4 = string.sub(rawUCI, 1, 4)
-                if legalSet[base4] then
-                    return rawUCI, tonumber(data.evaluation) or 0, data.mate
-                end
-            end
-        end
-    end
+    local fromSq = string.sub(uci, 1, 2)
+    local toSq = string.sub(uci, 3, 4)
+    local promoChar = string.lower(string.sub(uci, 5, 5) or "")
+    local promo = PROMO_CODE[promoChar]
 
-    -- 2. Nếu mạng lag hoặc API bận, dùng ngay Engine Alpha-Beta nội bộ
-    local fallbackUCI, fallbackEval = GetLocalBestMove(board, isWhite, epSquare)
-    return fallbackUCI, fallbackEval, nil
+    local fromIdx = Engine.algToIndex64(fromSq)
+    local toIdx = Engine.algToIndex64(toSq)
+    if not fromIdx or not toIdx then return false end
+
+    -- Cách 1: Gọi chuẩn App.onBoardMove(from, to, promo, false) của RoChess!
+    pcall(function()
+        App.onBoardMove(fromIdx, toIdx, promo, false)
+    end)
+    task.wait(0.06)
+    if #(session.ucis or {}) > beforePly then return true end
+
+    -- Cách 2: Gọi trực tiếp session:playMove(uci)
+    pcall(function()
+        if typeof(session.playMove) == "function" then
+            session:playMove(uci)
+        end
+    end)
+    task.wait(0.06)
+    if #(session.ucis or {}) > beforePly then return true end
+
+    -- Cách 3: Gọi App.playMove(uci)
+    pcall(function()
+        if typeof(App.playMove) == "function" then
+            App.playMove(uci)
+        end
+    end)
+    task.wait(0.06)
+
+    return #(session.ucis or {}) > beforePly
 end
 
--- =====================================================
--- 5. GIAO DIỆN HUD NHỎ GỌN (KHÔNG CHE BÀN CỜ & LỊCH SỬ)
--- =====================================================
-local ParentGui = (gethui and gethui()) or game:GetService("CoreGui")
-local oldGui = ParentGui:FindFirstChild("RoChessAI_v2")
-if oldGui then oldGui:Destroy() end
-
+-- 6. GIAO DIỆN HUD GỌN Ở MÉP TRÊN (KHÔNG CHE BÀN CỜ & BIÊN BẢN)
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "RoChessAI_v2"
+ScreenGui.Name = "RoChessAI_v4"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = ParentGui
 
-local HudFrame = Instance.new("Frame")
-HudFrame.Size = UDim2.new(0, 320, 0, 74)
-HudFrame.Position = UDim2.new(0.5, -160, 0.88, 0) -- Đặt gọn ở sát đáy màn hình
-HudFrame.BackgroundColor3 = Color3.fromRGB(18, 20, 26)
-HudFrame.BackgroundTransparency = 0.08
-HudFrame.BorderSizePixel = 0
-HudFrame.Active = true
-HudFrame.Draggable = true
-HudFrame.Parent = ScreenGui
-Instance.new("UICorner", HudFrame).CornerRadius = UDim.new(0, 10)
+local MainHud = Instance.new("Frame")
+MainHud.Size = UDim2.new(0, 315, 0, 66)
+MainHud.Position = UDim2.new(0.5, -157, 0.008, 0)
+MainHud.BackgroundColor3 = Color3.fromRGB(15, 17, 23)
+MainHud.BackgroundTransparency = 0.06
+MainHud.BorderSizePixel = 0
+MainHud.Active = true
+MainHud.Draggable = true
+MainHud.Parent = ScreenGui
+Instance.new("UICorner", MainHud).CornerRadius = UDim.new(0, 8)
 
-local Stroke = Instance.new("UIStroke", HudFrame)
-Stroke.Color = Color3.fromRGB(65, 185, 115)
-Stroke.Thickness = 1.5
+local UiStroke = Instance.new("UIStroke", MainHud)
+UiStroke.Color = Color3.fromRGB(45, 225, 115)
+UiStroke.Thickness = 1.6
 
-local StatusLbl = Instance.new("TextLabel")
-StatusLbl.Size = UDim2.new(0.68, -10, 0, 38)
-StatusLbl.Position = UDim2.new(0, 10, 0, 6)
-StatusLbl.BackgroundTransparency = 1
-StatusLbl.Text = "🤖 RoChess AI v2 [FULL AUTO]\nĐang quét bàn cờ..."
-StatusLbl.TextColor3 = Color3.fromRGB(240, 245, 255)
-StatusLbl.Font = Enum.Font.GothamBold
-StatusLbl.TextSize = 11
-StatusLbl.TextXAlignment = Enum.TextXAlignment.Left
-StatusLbl.TextWrapped = true
-StatusLbl.Parent = HudFrame
+local TopLabel = Instance.new("TextLabel")
+TopLabel.Size = UDim2.new(0.71, -8, 0, 35)
+TopLabel.Position = UDim2.new(0, 9, 0, 4)
+TopLabel.BackgroundTransparency = 1
+TopLabel.Text = "⚡ RoChess AI v4.0 [VORTEX + SF16]\nĐã dọn sạch bản cũ, sẵn sàng!"
+TopLabel.TextColor3 = Color3.fromRGB(240, 248, 255)
+TopLabel.Font = Enum.Font.GothamBold
+TopLabel.TextSize = 11
+TopLabel.TextXAlignment = Enum.TextXAlignment.Left
+TopLabel.TextWrapped = true
+TopLabel.Parent = MainHud
 
-local AnalysisLbl = Instance.new("TextLabel")
-AnalysisLbl.Size = UDim2.new(0.95, -10, 0, 24)
-AnalysisLbl.Position = UDim2.new(0, 10, 0, 46)
-AnalysisLbl.BackgroundTransparency = 1
-AnalysisLbl.Text = "Phân tích: Sẵn sàng tự động chơi từ đầu tới cuối"
-AnalysisLbl.TextColor3 = Color3.fromRGB(120, 235, 155)
-AnalysisLbl.Font = Enum.Font.GothamMedium
-AnalysisLbl.TextSize = 11
-AnalysisLbl.TextXAlignment = Enum.TextXAlignment.Left
-AnalysisLbl.TextWrapped = true
-AnalysisLbl.Parent = HudFrame
+local SubLabel = Instance.new("TextLabel")
+SubLabel.Size = UDim2.new(0.96, -10, 0, 22)
+SubLabel.Position = UDim2.new(0, 9, 0, 41)
+SubLabel.BackgroundTransparency = 1
+SubLabel.Text = "Tự động phân tích lỗi đối thủ & đánh thắng từ đầu tới cuối"
+SubLabel.TextColor3 = Color3.fromRGB(110, 240, 150)
+SubLabel.Font = Enum.Font.GothamMedium
+SubLabel.TextSize = 10
+SubLabel.TextXAlignment = Enum.TextXAlignment.Left
+SubLabel.TextWrapped = true
+SubLabel.Parent = MainHud
 
-local AutoBtn = Instance.new("TextButton")
-AutoBtn.Size = UDim2.new(0.28, 0, 0, 32)
-AutoBtn.Position = UDim2.new(0.70, 0, 0, 8)
-AutoBtn.BackgroundColor3 = Color3.fromRGB(40, 170, 95)
-AutoBtn.Text = "AUTO: ON"
-AutoBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-AutoBtn.Font = Enum.Font.GothamBold
-AutoBtn.TextSize = 11
-AutoBtn.Parent = HudFrame
-Instance.new("UICorner", AutoBtn).CornerRadius = UDim.new(0, 6)
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.26, 0, 0, 30)
+ToggleBtn.Position = UDim2.new(0.72, 0, 0, 6)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(35, 175, 90)
+ToggleBtn.Text = "AUTO: ON"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.TextSize = 11
+ToggleBtn.Parent = MainHud
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
 
-AutoBtn.MouseButton1Click:Connect(function()
-    Config.AutoPlay = not Config.AutoPlay
-    AutoBtn.Text = Config.AutoPlay and "AUTO: ON" or "AUTO: OFF"
-    AutoBtn.BackgroundColor3 = Config.AutoPlay and Color3.fromRGB(40, 170, 95) or Color3.fromRGB(70, 75, 90)
-    Stroke.Color = Config.AutoPlay and Color3.fromRGB(65, 185, 115) or Color3.fromRGB(120, 120, 135)
+ToggleBtn.MouseButton1Click:Connect(function()
+    CFG.AutoPlay = not CFG.AutoPlay
+    ToggleBtn.Text = CFG.AutoPlay and "AUTO: ON" or "AUTO: OFF"
+    ToggleBtn.BackgroundColor3 = CFG.AutoPlay and Color3.fromRGB(35, 175, 90) or Color3.fromRGB(70, 75, 88)
+    UiStroke.Color = CFG.AutoPlay and Color3.fromRGB(45, 225, 115) or Color3.fromRGB(130, 130, 145)
 end)
 
--- =====================================================
--- 6. VÒNG LẶP TỰ CHƠI & PHÂN TÍCH LỖI ĐỐI THỦ (START TO FINISH)
--- =====================================================
-local LastProcessedKey = ""
-local LastEval = 0
+-- 7. VÒNG LẶP CHÍNH: THEO DÕI SESSION, VẼ MŨI TÊN & TỰ ĐÁNH THẮNG
+local LastSession = nil
+local LastEvaluatedPly = -1
+local PrevScore = 0
 
 task.spawn(function()
-    while task.wait(0.35) do
-        local boardFrame, myColor = DetectBoardAndOrientation()
-        if boardFrame then
-            local moveList = UpdateMoveHistoryFromUI()
-            local board = NewBoard()
-            local epSquare = nil
-            local validPlyCount = 0
-
-            for i, san in ipairs(moveList) do
-                local isWhiteTurn = (i % 2 == 1)
-                local nextBoard, nextEp, ok = ApplyValidatedSAN(board, san, isWhiteTurn, epSquare)
-                if ok then
-                    board = nextBoard
-                    epSquare = nextEp
-                    validPlyCount = i
-                else
-                    break
-                end
+    while Running and task.wait(0.18) do
+        local session = App.session
+        if not session or session.over or session.kind == "idle" then
+            TopLabel.Text = "⚡ RoChess AI v4.0 [VORTEX + SF16]\nĐang đợi bắt đầu ván đấu..."
+        else
+            if session ~= LastSession then
+                LastSession = session
+                LastEvaluatedPly = -1
+                PrevScore = 0
             end
 
-            local activeColor = (validPlyCount % 2 == 0) and "w" or "b"
-            local stateKey = string.format("%s_%d_%s", myColor, validPlyCount, moveList[validPlyCount] or "start")
+            local ucis = session.ucis or {}
+            local plyCount = #ucis
+            local myColorName = (session.myColor == 1) and "TRẮNG" or "ĐEN"
+            local okTurn, isMyTurn = pcall(function() return session:isMyTurn() end)
 
-            if stateKey ~= LastProcessedKey then
-                local isWhiteNext = (activeColor == "w")
-                local fullMove = math.floor(validPlyCount / 2) + 1
-                local bestMove, evalScore, mateScore = GetBestMoveAI(board, isWhiteNext, epSquare, fullMove)
+            if okTurn and isMyTurn then
+                local bestMove, score, mate, srcName = ComputeBestMove(session)
 
-                if bestMove then
-                    local evalStr = mateScore and ("#" .. tostring(mateScore)) or string.format("%+.2f", evalScore)
-                    StatusLbl.Text = string.format(
-                        "Quân bạn: %s | Lượt: %s (Đánh giá: %s)\nNước đi AI: %s -> %s",
-                        myColor == "w" and "TRẮNG" or "ĐEN",
-                        activeColor == "w" and "Trắng" or "Đen",
-                        evalStr,
-                        string.sub(bestMove, 1, 2),
-                        string.sub(bestMove, 3, 4)
+                if bestMove and Running and App.session == session and #(session.ucis or {}) == plyCount then
+                    DrawBoardArrow(bestMove)
+
+                    local scoreStr = mate and ("Mate #" .. tostring(mate)) or string.format("%+.2f", score)
+                    TopLabel.Text = string.format(
+                        "Quân: %s | %s (%s)\nNước đi: %s -> %s",
+                        myColorName, srcName, scoreStr,
+                        string.sub(bestMove, 1, 2), string.sub(bestMove, 3, 4)
                     )
 
-                    -- Phân tích nước đi vừa rồi của đối thủ
-                    if validPlyCount > 0 and activeColor == myColor then
-                        local gain = (myColor == "w") and (evalScore - LastEval) or (LastEval - evalScore)
-                        local oppMove = moveList[validPlyCount] or "?"
-                        if mateScore then
-                            AnalysisLbl.Text = string.format("🔥 Đối thủ đi %s -> Đã có chuỗi CHIẾU HẾT! Khai thác: %s", oppMove, bestMove)
-                            AnalysisLbl.TextColor3 = Color3.fromRGB(80, 255, 130)
-                        elseif gain >= 2.2 then
-                            AnalysisLbl.Text = string.format("🔥 BLUNDER từ đối thủ (%s)! Trừng phạt ngay: %s", oppMove, bestMove)
-                            AnalysisLbl.TextColor3 = Color3.fromRGB(80, 255, 130)
-                        elseif gain >= 0.9 then
-                            AnalysisLbl.Text = string.format("⚠️ Đối thủ đi yếu (%s). Chiếm ưu thế bằng: %s", oppMove, bestMove)
-                            AnalysisLbl.TextColor3 = Color3.fromRGB(255, 215, 90)
+                    if plyCount > 0 and LastEvaluatedPly ~= plyCount then
+                        LastEvaluatedPly = plyCount
+                        local oppLast = ucis[plyCount] or "?"
+                        local diff = math.abs(score - PrevScore)
+
+                        if mate then
+                            SubLabel.Text = string.format("🔥 Đối thủ đi %s -> Đã khóa chuỗi CHIẾU HẾT bằng %s!", oppLast, bestMove)
+                            SubLabel.TextColor3 = Color3.fromRGB(85, 255, 135)
+                        elseif diff >= 1.8 then
+                            SubLabel.Text = string.format("🔥 BLUNDER từ đối thủ (%s)! Trừng phạt bằng %s", oppLast, bestMove)
+                            SubLabel.TextColor3 = Color3.fromRGB(85, 255, 135)
+                        elseif diff >= 0.75 then
+                            SubLabel.Text = string.format("⚠️ Đối thủ đi yếu (%s) -> Khai thác bằng %s", oppLast, bestMove)
+                            SubLabel.TextColor3 = Color3.fromRGB(255, 215, 85)
                         else
-                            AnalysisLbl.Text = string.format("Đối thủ vừa đi %s -> AI đang ép thế trận bằng %s", oppMove, bestMove)
-                            AnalysisLbl.TextColor3 = Color3.fromRGB(185, 220, 255)
+                            SubLabel.Text = string.format("Đối thủ đi %s -> Phản đòn tối ưu: %s", oppLast, bestMove)
+                            SubLabel.TextColor3 = Color3.fromRGB(175, 225, 255)
                         end
+                        PrevScore = score
                     end
-                    LastEval = evalScore
 
-                    -- Nếu đến lượt bạn và đang bật AutoPlay -> Tự động đi quân và kiểm tra xác nhận
-                    if Config.AutoPlay and activeColor == myColor then
-                        local delayTime = Config.MoveDelayMin + math.random() * (Config.MoveDelayMax - Config.MoveDelayMin)
-                        task.wait(delayTime)
-                        ExecuteMoveOnBoard(bestMove, myColor)
-
-                        -- Đợi ngắn xem nước đi đã được ghi nhận chưa; nếu chưa thì thử lại ở vòng lặp kế tiếp
-                        task.wait(Config.RetryInterval)
-                        local updatedMoves = UpdateMoveHistoryFromUI()
-                        if #updatedMoves > validPlyCount then
-                            LastProcessedKey = stateKey
+                    if CFG.AutoPlay then
+                        local waitSec = CFG.MoveDelayMin + math.random() * (CFG.MoveDelayMax - CFG.MoveDelayMin)
+                        task.wait(waitSec)
+                        if Running and App.session == session and #(session.ucis or {}) == plyCount then
+                            ExecuteMoveNative(session, bestMove)
                         end
-                    else
-                        LastProcessedKey = stateKey
                     end
                 end
+            else
+                TopLabel.Text = string.format(
+                    "Quân: %s | Đang đợi đối thủ đi...\nSố nước đã đi: %d",
+                    myColorName, plyCount
+                )
             end
         end
     end
