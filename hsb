@@ -1,11 +1,10 @@
 -- Language: Luau (Roblox Executor)
--- Module: MonicaHub_KillstreakBR_v1_2.lua
+-- Module: MonicaHub_KillstreakBR_v1_3.lua
 -- Runtime: Roblox Client / Mobile & PC Executors
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
 local CoreGui = game:GetService("CoreGui")
 local Workspace = game:GetService("Workspace")
 
@@ -32,18 +31,18 @@ local Config = {
     Memory = {
         Unlocked = false,
         RequiredKey = "monica",
-        TeleBehindAndAttack = false,
-        MaxRange = 70, -- Phạm vi 70m theo yêu cầu
+        TeleBehindEnabled = false, -- Công tắc tổng trong tab Memory (bật lên sẽ hiện nút nổi "telesau")
+        TeleActive = true,         -- Trạng thái của nút nổi "telesau": true = Xanh (Hoạt động), false = Đỏ (Dừng)
+        MaxRange = 120,            -- Phạm vi 120m theo yêu cầu mới
         TargetPriority = "LowestHP", -- "LowestHP" (Địch yếu máu nhất) | "Closest" (Địch gần nhất)
-        BehindStuds = 3.5 -- Khoảng cách đứng sau lưng địch (studs)
+        BehindStuds = 3.5          -- Khoảng cách đứng sau lưng địch (studs)
     }
 }
 
 local CurrentTabMode = "ALL"
 local IsShooting = false
 local ActiveTouch = nil
-local LastAutoAttackClock = 0
-local RenderStepName = "MonicaHub_RenderLoop_v12"
+local RenderStepName = "MonicaHub_RenderLoop_v13"
 
 -- // DỌN DẸP BẢN CŨ TRƯỚC KHI KHỞI TẠO
 pcall(function()
@@ -110,7 +109,7 @@ local function MakeDraggable(dragHandle, targetFrame)
     end)
 end
 
--- // 1. NÚT ẨN / HIỆN MENU DẠNG PILL
+-- // 1A. NÚT NỔI ẨN / HIỆN MENU DẠNG PILL
 local TogglePill = Instance.new("TextButton")
 TogglePill.Name = "TogglePill"
 TogglePill.Size = UDim2.new(0, 128, 0, 38)
@@ -165,6 +164,87 @@ PillFPSLabel.ZIndex = 21
 PillFPSLabel.Parent = TogglePill
 
 MakeDraggable(TogglePill, TogglePill)
+
+-- // 1B. NÚT NỔI "telesau" (DỪNG / TIẾP TỤC CHỨC NĂNG TELE RA SAU ĐỊCH)
+-- Chỉ hiển thị khi bật chức năng Tele trong phần Memory: Xanh = Hoạt động, Đỏ = Dừng
+local TeleSauPill = Instance.new("TextButton")
+TeleSauPill.Name = "TeleSauPill"
+TeleSauPill.Size = UDim2.new(0, 128, 0, 38)
+TeleSauPill.Position = UDim2.new(0.22, 140, 0.08, 0)
+TeleSauPill.BackgroundColor3 = Color3.fromRGB(28, 30, 34)
+TeleSauPill.BackgroundTransparency = 0.12
+TeleSauPill.Text = ""
+TeleSauPill.AutoButtonColor = false
+TeleSauPill.Visible = false
+TeleSauPill.ZIndex = 20
+TeleSauPill.Parent = ScreenGui
+
+local TelePillCorner = Instance.new("UICorner")
+TelePillCorner.CornerRadius = UDim.new(1, 0)
+TelePillCorner.Parent = TeleSauPill
+
+local TelePillStroke = Instance.new("UIStroke")
+TelePillStroke.Color = Color3.fromRGB(39, 201, 63)
+TelePillStroke.Thickness = 1.5
+TelePillStroke.Parent = TeleSauPill
+
+local TeleDotBadge = Instance.new("Frame")
+TeleDotBadge.Size = UDim2.new(0, 28, 0, 28)
+TeleDotBadge.Position = UDim2.new(0, 5, 0.5, -14)
+TeleDotBadge.BackgroundColor3 = Color3.fromRGB(39, 201, 63)
+TeleDotBadge.ZIndex = 21
+TeleDotBadge.Parent = TeleSauPill
+
+local TeleDotCorner = Instance.new("UICorner")
+TeleDotCorner.CornerRadius = UDim.new(1, 0)
+TeleDotCorner.Parent = TeleDotBadge
+
+local TeleDotIcon = Instance.new("TextLabel")
+TeleDotIcon.Size = UDim2.new(1, 0, 1, 0)
+TeleDotIcon.BackgroundTransparency = 1
+TeleDotIcon.Text = "ON"
+TeleDotIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+TeleDotIcon.Font = Enum.Font.GothamBlack
+TeleDotIcon.TextSize = 10
+TeleDotIcon.ZIndex = 22
+TeleDotIcon.Parent = TeleDotBadge
+
+local TeleSauText = Instance.new("TextLabel")
+TeleSauText.Size = UDim2.new(1, -40, 1, 0)
+TeleSauText.Position = UDim2.new(0, 38, 0, 0)
+TeleSauText.BackgroundTransparency = 1
+TeleSauText.Text = "telesau"
+TeleSauText.TextColor3 = Color3.fromRGB(53, 224, 96)
+TeleSauText.Font = Enum.Font.GothamBold
+TeleSauText.TextSize = 14
+TeleSauText.TextXAlignment = Enum.TextXAlignment.Left
+TeleSauText.ZIndex = 21
+TeleSauText.Parent = TeleSauPill
+
+MakeDraggable(TeleSauPill, TeleSauPill)
+
+local function UpdateTeleSauPillVisual()
+    if Config.Memory.TeleActive then
+        -- Màu xanh: Chức năng đang hoạt động
+        TeleDotBadge.BackgroundColor3 = Color3.fromRGB(39, 201, 63)
+        TelePillStroke.Color = Color3.fromRGB(39, 201, 63)
+        TeleSauText.TextColor3 = Color3.fromRGB(53, 224, 96)
+        TeleDotIcon.Text = "ON"
+    else
+        -- Màu đỏ: Dừng chức năng
+        TeleDotBadge.BackgroundColor3 = Color3.fromRGB(225, 55, 55)
+        TelePillStroke.Color = Color3.fromRGB(225, 55, 55)
+        TeleSauText.TextColor3 = Color3.fromRGB(255, 85, 85)
+        TeleDotIcon.Text = "OFF"
+    end
+end
+
+TeleSauPill.MouseButton1Click:Connect(function()
+    Config.Memory.TeleActive = not Config.Memory.TeleActive
+    UpdateTeleSauPillVisual()
+end)
+
+UpdateTeleSauPillVisual()
 
 -- // 2. CỬA SỔ CHÍNH MONICA HUB
 local MainWindow = Instance.new("Frame")
@@ -248,7 +328,7 @@ CloseBtn.Parent = TopBar
 
 MakeDraggable(TopBar, MainWindow)
 
--- Cột Sidebar bên trái (Có nút Esp & Aim và nút Memory riêng như bố cục menu mẫu)
+-- Cột Sidebar bên trái
 local Sidebar = Instance.new("Frame")
 Sidebar.Size = UDim2.new(0, 125, 1, -34)
 Sidebar.Position = UDim2.new(0, 0, 0, 34)
@@ -305,7 +385,7 @@ local SideInfo = Instance.new("TextLabel")
 SideInfo.Size = UDim2.new(1, -16, 0, 50)
 SideInfo.Position = UDim2.new(0, 10, 1, -56)
 SideInfo.BackgroundTransparency = 1
-SideInfo.Text = "Monica Hub v1.2\nKillstreak BR"
+SideInfo.Text = "Monica Hub v1.3\nKillstreak BR"
 SideInfo.TextColor3 = Color3.fromRGB(115, 120, 130)
 SideInfo.Font = Enum.Font.Gotham
 SideInfo.TextSize = 11
@@ -603,7 +683,7 @@ local MemSwitchHeader = Instance.new("TextLabel")
 MemSwitchHeader.Size = UDim2.new(1, 0, 0, 18)
 MemSwitchHeader.Position = UDim2.new(0, 0, 0, 0)
 MemSwitchHeader.BackgroundTransparency = 1
-MemSwitchHeader.Text = "Switch — Memory (Phạm vi 70m)"
+MemSwitchHeader.Text = "Switch — Memory (Phạm vi 120m)"
 MemSwitchHeader.TextColor3 = Color3.fromRGB(155, 160, 170)
 MemSwitchHeader.Font = Enum.Font.GothamSemibold
 MemSwitchHeader.TextSize = 12
@@ -611,17 +691,23 @@ MemSwitchHeader.TextXAlignment = Enum.TextXAlignment.Left
 MemSwitchHeader.ZIndex = 8
 MemSwitchHeader.Parent = MemoryContainer
 
-local TeleAttackToggle = CreateCheckbox(
+local TeleBehindToggle = CreateCheckbox(
     MemoryContainer,
-    "Tele nhanh ra sau địch (≤70m) & Tự bắn/đánh",
+    "Tele nhanh ra sau địch (≤120m) [Hiện nút telesau]",
     0,
     26,
-    340,
+    350,
     false,
     function(val)
-        Config.Memory.TeleBehindAndAttack = val
-        if not val then
-            IsShooting = false
+        Config.Memory.TeleBehindEnabled = val
+        if val then
+            -- Khi vừa bật chức năng: tự hiện nút nổi "telesau" ở trạng thái Xanh (Hoạt động)
+            Config.Memory.TeleActive = true
+            UpdateTeleSauPillVisual()
+            TeleSauPill.Visible = true
+        else
+            -- Khi tắt chức năng trong menu: ẩn nút nổi "telesau"
+            TeleSauPill.Visible = false
         end
     end
 )
@@ -650,7 +736,7 @@ local MemSettingsHeader = Instance.new("TextLabel")
 MemSettingsHeader.Size = UDim2.new(1, 0, 0, 18)
 MemSettingsHeader.Position = UDim2.new(0, 0, 0, 96)
 MemSettingsHeader.BackgroundTransparency = 1
-MemSettingsHeader.Text = "Settings — Cách lựa chọn mục tiêu"
+MemSettingsHeader.Text = "Settings — Cách lựa chọn mục tiêu (120m)"
 MemSettingsHeader.TextColor3 = Color3.fromRGB(155, 160, 170)
 MemSettingsHeader.Font = Enum.Font.GothamSemibold
 MemSettingsHeader.TextSize = 12
@@ -658,7 +744,7 @@ MemSettingsHeader.TextXAlignment = Enum.TextXAlignment.Left
 MemSettingsHeader.ZIndex = 8
 MemSettingsHeader.Parent = MemoryContainer
 
--- Hộp Dropdown chọn mục tiêu (Thiết kế giống hệt thanh "Aim body / Bullet head" có nút mũi tên xanh trong video)
+-- Hộp Dropdown chọn mục tiêu (Có nút mũi tên xanh xổ xuống)
 local DropdownBar = Instance.new("TextButton")
 DropdownBar.Name = "TargetPriorityDropdown"
 DropdownBar.Size = UDim2.new(0, 260, 0, 28)
@@ -691,7 +777,6 @@ DropdownSelectedText.TextXAlignment = Enum.TextXAlignment.Left
 DropdownSelectedText.ZIndex = 13
 DropdownSelectedText.Parent = DropdownBar
 
--- Nút vuông màu xanh chứa mũi tên trắng ở góc phải thanh Dropdown như trong video
 local DropdownArrowBox = Instance.new("Frame")
 DropdownArrowBox.Size = UDim2.new(0, 26, 0, 24)
 DropdownArrowBox.Position = UDim2.new(1, -28, 0.5, -12)
@@ -725,7 +810,6 @@ HelpMark.TextSize = 12
 HelpMark.ZIndex = 12
 HelpMark.Parent = MemoryContainer
 
--- Danh sách xổ xuống khi bấm vào thanh Dropdown
 local DropdownListFrame = Instance.new("Frame")
 DropdownListFrame.Name = "DropdownListFrame"
 DropdownListFrame.Size = UDim2.new(0, 260, 0, 58)
@@ -933,7 +1017,6 @@ end
 
 local function SetTabFilter(mode)
     if mode == "MEMORY" and not Config.Memory.Unlocked then
-        -- Chưa mở khóa -> hiện bảng hỏi Key, giữ nguyên tab cũ bên dưới
         KeyStatusMsg.Text = ""
         KeyInputBox.Text = ""
         KeyModalOverlay.Visible = true
@@ -973,7 +1056,6 @@ local function SetTabFilter(mode)
     end
 end
 
--- Xử lý nút Xác nhận Key & nút Đóng trên bảng Key
 KeyVerifyBtn.MouseButton1Click:Connect(function()
     local entered = string.lower((KeyInputBox.Text or ""):gsub("^%s*(.-)%s*$", "%1"))
     if entered == Config.Memory.RequiredKey then
@@ -988,7 +1070,6 @@ KeyVerifyBtn.MouseButton1Click:Connect(function()
 end)
 
 KeyCloseBtn.MouseButton1Click:Connect(function()
-    -- Đóng bảng hỏi Key và tiếp tục sử dụng 2 chức năng ESP & Aimbot bình thường
     KeyModalOverlay.Visible = false
     KeyStatusMsg.Text = ""
     if CurrentTabMode == "MEMORY" then
@@ -1035,7 +1116,7 @@ FOVStroke.Thickness = 1.5
 FOVStroke.Transparency = 0.15
 FOVStroke.Parent = FOVCircleFrame
 
--- // 5. NHẬN DIỆN ẤN GIỮ NÚT TẤN CÔNG / NÚT BẮN
+-- // 5. NHẬN DIỆN ẤN GIỮ NÚT TẤN CÔNG / NÚT BẮN (DÀNH CHO AIMBOT)
 local function IsPointOverShootControl(screenPos)
     local pGui = LocalPlayer:FindFirstChild("PlayerGui")
     if pGui then
@@ -1079,14 +1160,19 @@ local function SetShootingState(active)
     end
 end
 
+local function IsPointInsideFrame(pos, frame)
+    if not frame.Visible then return false end
+    local fPos = frame.AbsolutePosition
+    local fSize = frame.AbsoluteSize
+    return pos.X >= fPos.X and pos.X <= (fPos.X + fSize.X) and pos.Y >= fPos.Y and pos.Y <= (fPos.Y + fSize.Y)
+end
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if Config.MenuOpen and MainWindow.Visible then
-        local mPos = input.Position
-        local wPos = MainWindow.AbsolutePosition
-        local wSize = MainWindow.AbsoluteSize
-        if mPos.X >= wPos.X and mPos.X <= (wPos.X + wSize.X) and mPos.Y >= wPos.Y and mPos.Y <= (wPos.Y + wSize.Y) then
-            return
-        end
+    -- Bỏ qua nếu người dùng đang bấm vào cửa sổ Menu hoặc 2 nút nổi
+    if IsPointInsideFrame(input.Position, MainWindow)
+        or IsPointInsideFrame(input.Position, TogglePill)
+        or IsPointInsideFrame(input.Position, TeleSauPill) then
+        return
     end
 
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -1206,7 +1292,8 @@ local function IsValidEnemyModel(model, myChar, myRoot)
         return false
     end
 
-    if myRoot and (root.Position - myRoot.Position).Magnitude < 1.8 and not Config.Memory.TeleBehindAndAttack then
+    local isTeleRunning = Config.Memory.Unlocked and Config.Memory.TeleBehindEnabled and Config.Memory.TeleActive
+    if myRoot and (root.Position - myRoot.Position).Magnitude < 1.8 and not isTeleRunning then
         return false
     end
 
@@ -1284,36 +1371,7 @@ local function HasClearLineOfSight(targetPart, targetCharacter)
     return false
 end
 
--- // 8. HÀM TỰ BẮN / ĐÁNH ĐỊCH KHI ĐANG TELE SAU LƯNG
-local function TriggerAutoAttack()
-    local now = os.clock()
-    if now - LastAutoAttackClock < 0.08 then
-        return
-    end
-    LastAutoAttackClock = now
-
-    local myChar = LocalPlayer.Character
-    if myChar then
-        local tool = myChar:FindFirstChildOfClass("Tool")
-        if tool then
-            pcall(function()
-                tool:Activate()
-            end)
-        end
-    end
-
-    -- Kích hoạt click / chạm tấn công trên cả Executor Mobile và PC
-    pcall(function()
-        if mouse1click then
-            mouse1click()
-        else
-            VirtualUser:CaptureController()
-            VirtualUser:ClickButton1(Vector2.new(Camera.ViewportSize.X * 0.5, Camera.ViewportSize.Y * 0.5))
-        end
-    end)
-end
-
--- // 9. VÒNG LẶP ĐỒNG BỘ: MEMORY TELE 70M -> AIMBOT -> ESP
+-- // 8. VÒNG LẶP ĐỒNG BỘ: MEMORY TELE 120M (KHÔNG TỰ ĐÁNH) -> AIMBOT -> ESP
 local frameCount = 0
 local lastFPSTime = os.clock()
 
@@ -1345,75 +1403,73 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
 
-    -- BƯỚC 1: CHỨC NĂNG MEMORY — TELE NHANH RA SAU ĐỊCH (≤ 70M) & TỰ BẮN/ĐÁNH
-    if Config.Memory.Unlocked and Config.Memory.TeleBehindAndAttack and myRoot and myHum and myHum.Health > 0 then
-        local chosenEnemy = nil
-        local bestScore = math.huge
-        local chosenDistMeters = 0
+    -- BƯỚC 1: CHỨC NĂNG MEMORY — CHỈ TELE NHANH RA SAU ĐỊCH TRONG PHẠM VI 120M (KHÔNG TỰ BẮN/ĐÁNH)
+    if Config.Memory.Unlocked and Config.Memory.TeleBehindEnabled then
+        if Config.Memory.TeleActive then
+            if myRoot and myHum and myHum.Health > 0 then
+                local chosenEnemy = nil
+                local bestScore = math.huge
+                local chosenDistMeters = 0
 
-        for _, enemyChar in ipairs(activeEnemies) do
-            local eRoot = enemyChar:FindFirstChild("HumanoidRootPart")
-            local eHum = enemyChar:FindFirstChildOfClass("Humanoid")
-            local eHead = enemyChar:FindFirstChild("Head")
+                for _, enemyChar in ipairs(activeEnemies) do
+                    local eRoot = enemyChar:FindFirstChild("HumanoidRootPart")
+                    local eHum = enemyChar:FindFirstChildOfClass("Humanoid")
 
-            if eRoot and eHum and eHead and eHum.Health > 0 then
-                local distStuds = (myRoot.Position - eRoot.Position).Magnitude
-                local distMeters = distStuds * 0.28
+                    if eRoot and eHum and eHum.Health > 0 then
+                        local distStuds = (myRoot.Position - eRoot.Position).Magnitude
+                        local distMeters = distStuds * 0.28
 
-                -- Chỉ quét mục tiêu trong bán kính 70m
-                if distMeters <= Config.Memory.MaxRange then
-                    if Config.Memory.TargetPriority == "LowestHP" then
-                        -- Ưu tiên địch yếu máu nhất (nếu bằng máu thì lấy đứa gần hơn)
-                        local score = (eHum.Health * 1000) + distMeters
-                        if score < bestScore then
-                            bestScore = score
-                            chosenEnemy = enemyChar
-                            chosenDistMeters = math.max(1, math.floor(distMeters + 0.5))
-                        end
-                    else
-                        -- Ưu tiên địch gần nhất
-                        if distMeters < bestScore then
-                            bestScore = distMeters
-                            chosenEnemy = enemyChar
-                            chosenDistMeters = math.max(1, math.floor(distMeters + 0.5))
+                        -- Chỉ quét mục tiêu trong bán kính 120m
+                        if distMeters <= Config.Memory.MaxRange then
+                            if Config.Memory.TargetPriority == "LowestHP" then
+                                local score = (eHum.Health * 1000) + distMeters
+                                if score < bestScore then
+                                    bestScore = score
+                                    chosenEnemy = enemyChar
+                                    chosenDistMeters = math.max(1, math.floor(distMeters + 0.5))
+                                end
+                            else
+                                if distMeters < bestScore then
+                                    bestScore = distMeters
+                                    chosenEnemy = enemyChar
+                                    chosenDistMeters = math.max(1, math.floor(distMeters + 0.5))
+                                end
+                            end
                         end
                     end
                 end
-            end
-        end
 
-        if chosenEnemy then
-            local eRoot = chosenEnemy:FindFirstChild("HumanoidRootPart")
-            local eHead = chosenEnemy:FindFirstChild("Head")
-            local eHum = chosenEnemy:FindFirstChildOfClass("Humanoid")
+                if chosenEnemy then
+                    local eRoot = chosenEnemy:FindFirstChild("HumanoidRootPart")
+                    local eHum = chosenEnemy:FindFirstChildOfClass("Humanoid")
 
-            if eRoot and eHead and eHum then
-                -- Tính vị trí ngay phía sau lưng địch (ngược hướng LookVector của địch) và quay mặt về phía địch
-                local lookVec = eRoot.CFrame.LookVector
-                local flatLook = Vector3.new(lookVec.X, 0, lookVec.Z)
-                if flatLook.Magnitude < 0.05 then
-                    flatLook = Vector3.new(0, 0, -1)
+                    if eRoot and eHum then
+                        -- Tính vị trí ngay phía sau lưng địch và quay mặt nhân vật về phía lưng địch (không tự động bắn/đánh)
+                        local lookVec = eRoot.CFrame.LookVector
+                        local flatLook = Vector3.new(lookVec.X, 0, lookVec.Z)
+                        if flatLook.Magnitude < 0.05 then
+                            flatLook = Vector3.new(0, 0, -1)
+                        else
+                            flatLook = flatLook.Unit
+                        end
+
+                        local behindPos = eRoot.Position - (flatLook * Config.Memory.BehindStuds)
+                        myRoot.CFrame = CFrame.new(behindPos, Vector3.new(eRoot.Position.X, behindPos.Y, eRoot.Position.Z))
+                        myRoot.AssemblyLinearVelocity = Vector3.zero
+
+                        MemTargetStatus.Text = string.format(
+                            'Đang Tele: <font color="#35e060">%s</font> | HP: <font color="#ffdf5d">%d</font> | Cách: <font color="#63b3ff">%dm</font>',
+                            chosenEnemy.Name,
+                            math.floor(eHum.Health),
+                            chosenDistMeters
+                        )
+                    end
                 else
-                    flatLook = flatLook.Unit
+                    MemTargetStatus.Text = 'Mục tiêu hiện tại: <font color="#ff9d5c">Không có địch nào trong phạm vi 120m</font>'
                 end
-
-                local behindPos = eRoot.Position - (flatLook * Config.Memory.BehindStuds)
-                myRoot.CFrame = CFrame.new(behindPos, Vector3.new(eRoot.Position.X, behindPos.Y, eRoot.Position.Z))
-                myRoot.AssemblyLinearVelocity = Vector3.zero
-
-                -- Khóa thẳng tâm Camera vào đầu/thân địch và tự động kích hoạt bắn/đánh
-                Camera.CFrame = CFrame.new(Camera.CFrame.Position, eHead.Position)
-                TriggerAutoAttack()
-
-                MemTargetStatus.Text = string.format(
-                    'Mục tiêu: <font color="#35e060">%s</font> | HP: <font color="#ffdf5d">%d</font> | Cách: <font color="#63b3ff">%dm</font>',
-                    chosenEnemy.Name,
-                    math.floor(eHum.Health),
-                    chosenDistMeters
-                )
             end
         else
-            MemTargetStatus.Text = 'Mục tiêu hiện tại: <font color="#ff9d5c">Không có địch nào trong phạm vi 70m</font>'
+            MemTargetStatus.Text = 'Mục tiêu hiện tại: <font color="#ff5555">Đã tạm dừng bằng nút telesau (Đỏ)</font>'
         end
     else
         MemTargetStatus.Text = 'Mục tiêu hiện tại: <font color="#9096a4">Đang chờ kích hoạt...</font>'
