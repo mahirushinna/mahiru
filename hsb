@@ -1,453 +1,917 @@
--- RoChess! AI v4.0 - Native VortexBot + Stockfish 16 + Direct Board Hook
--- Language: Luau | Runtime: Roblox Client Executor (Delta / Fluxus / Codex)
-
--- 1. DỌN SẠCH CÁC BẢN CŨ ĐANG CHẠY NGẦM TRONG BỘ NHỚ (v1, v2, v3)
-if _G.__RoChessAI_Cleanup then
-    pcall(_G.__RoChessAI_Cleanup)
-end
-_G.__BestMoveAutoPlay = false
+-- Language: Luau (Roblox Executor)
+-- Module: MonicaHub_KillstreakBR.lua
+-- Runtime: Roblox Client / Mobile & PC Executors (Drawing API + ScreenGui Hybrid)
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
+
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Camera = Workspace.CurrentCamera
 
-local ParentGui = (gethui and gethui()) or game:GetService("CoreGui")
-for _, guiName in ipairs({"RoChessAI_Overlay", "RoChessAI_v2", "RoChessAI_v3", "RoChessAI_v4"}) do
-    local old1 = ParentGui:FindFirstChild(guiName)
-    if old1 then old1:Destroy() end
-    local old2 = PlayerGui:FindFirstChild(guiName)
-    if old2 then old2:Destroy() end
-end
-
--- Xóa các khung HUD cũ còn sót lại theo Text nếu đổi tên
-for _, container in ipairs({ParentGui, PlayerGui}) do
-    for _, obj in ipairs(container:GetDescendants()) do
-        if obj:IsA("TextLabel") and (string.find(obj.Text or "", "RoChess AI") or string.find(obj.Text or "", "Blunder Detector")) then
-            local screen = obj:FindFirstAncestorOfClass("ScreenGui")
-            if screen then pcall(function() screen:Destroy() end) end
-        end
-    end
-end
-
--- 2. NẠP TRỰC TIẾP CÁC MODULE NỘI BỘ CỦA ROCHESS!
-local ChessFolder = ReplicatedStorage:WaitForChild("Chess", 10)
-local ClientFolder = ReplicatedStorage:WaitForChild("ChessClient", 10)
-assert(ChessFolder and ClientFolder, "[RoChess AI v4] Không tìm thấy ReplicatedStorage.Chess / ChessClient!")
-
-local Engine = require(ChessFolder:WaitForChild("Engine"))
-local Bot = require(ChessFolder:WaitForChild("Bot"))
-local VortexBot = ChessFolder:FindFirstChild("VortexBot") and require(ChessFolder.VortexBot) or nil
-local App = require(ClientFolder:WaitForChild("App"))
-
--- Bảng mã quân phong cấp của Engine RoChess (Queen=5, Rook=4, Bishop=3, Knight=2)
-local PROMO_CODE = { q = 5, r = 4, b = 3, n = 2 }
-
-local CFG = {
-    AutoPlay = true,
-    DrawArrow = true,
-    ThinkSeconds = 0.85,
-    MaxDepth = 16,
-    MoveDelayMin = 0.18,
-    MoveDelayMax = 0.42,
-    CloudTimeout = 1.15
+-- // CẤU HÌNH HỆ THỐNG (STATE)
+local Config = {
+    MenuOpen = true,
+    ESP = {
+        Box2D = false,
+        Health = false,
+        Distance = false,
+        ShowFOV = false
+    },
+    Aim = {
+        Enabled = false,
+        FOVRadius = 90,
+        VisibleCheck = true,
+        TargetPart = "Head",
+        Smoothness = 0.85 -- 1 = khóa cứng tức thì
+    }
 }
 
-local Running = true
-_G.__RoChessAI_Cleanup = function()
-    Running = false
-    pcall(function()
-        if App.board and typeof(App.board.setArrow) == "function" then
-            App.board:setArrow("hint", nil)
-        end
+local IsShooting = false
+local ActiveTouch = nil
+
+-- // BẢO VỆ GUI TRÊN EXECUTOR
+local function GetSafeGuiParent()
+    local success, result = pcall(function()
+        return (gethui and gethui()) or CoreGui
     end)
+    if success and result then
+        return result
+    end
+    return LocalPlayer:WaitForChild("PlayerGui")
 end
 
--- 3. BỘ DỰNG FEN TỪ LỊCH SỬ UCI CỦA SESSION (PHỤC VỤ CLOUD STOCKFISH/LICHESS)
-local Files = {"a", "b", "c", "d", "e", "f", "g", "h"}
-local FileMap = {a=1, b=2, c=3, d=4, e=5, f=6, g=7, h=8}
-
-local function SqToRC(sq)
-    local f = FileMap[string.sub(sq, 1, 1)]
-    local r = tonumber(string.sub(sq, 2, 2))
-    if not f or not r then return nil, nil end
-    return 9 - r, f
+-- Dọn bản cũ nếu chạy lại script
+local SafeParent = GetSafeGuiParent()
+if SafeParent:FindFirstChild("MonicaHub_UI") then
+    SafeParent.MonicaHub_UI:Destroy()
 end
 
-local function RCToSq(r, c)
-    return Files[c] .. tostring(9 - r)
-end
-
-local function BuildFEN(startFen, ucis)
-    local fenStr = startFen or "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-    local parts = string.split(fenStr, " ")
-    local rowsRaw = string.split(parts[1], "/")
-    local board = {}
-
-    for r = 1, 8 do
-        board[r] = {}
-        local col = 1
-        local rStr = rowsRaw[r] or "8"
-        for i = 1, #rStr do
-            local ch = string.sub(rStr, i, i)
-            local n = tonumber(ch)
-            if n then
-                for _ = 1, n do board[r][col] = "."; col = col + 1 end
-            else
-                board[r][col] = ch; col = col + 1
-            end
-        end
-    end
-
-    local whiteTurn = (parts[2] ~= "b")
-    local castling = parts[3] or "KQkq"
-    local epSquare = parts[4] or "-"
-
-    for _, uci in ipairs(ucis or {}) do
-        local fromSq = string.sub(uci, 1, 2)
-        local toSq = string.sub(uci, 3, 4)
-        local promo = string.sub(uci, 5, 5)
-        local fr, fc = SqToRC(fromSq)
-        local tr, tc = SqToRC(toSq)
-
-        if fr and tr then
-            local p = board[fr][fc]
-            local pu = string.upper(p)
-            local isW = (p ~= "." and pu == p)
-
-            if pu == "P" and fc ~= tc and board[tr][tc] == "." then
-                board[fr][tc] = "."
-            end
-            if pu == "K" and math.abs(tc - fc) == 2 then
-                if tc == 7 then board[fr][6] = board[fr][8]; board[fr][8] = "."
-                elseif tc == 3 then board[fr][4] = board[fr][1]; board[fr][1] = "." end
-            end
-
-            if pu == "K" then
-                castling = isW and string.gsub(castling, "[KQ]", "") or string.gsub(castling, "[kq]", "")
-            end
-            if fromSq == "a1" or toSq == "a1" then castling = string.gsub(castling, "Q", "") end
-            if fromSq == "h1" or toSq == "h1" then castling = string.gsub(castling, "K", "") end
-            if fromSq == "a8" or toSq == "a8" then castling = string.gsub(castling, "q", "") end
-            if fromSq == "h8" or toSq == "h8" then castling = string.gsub(castling, "k", "") end
-            if castling == "" then castling = "-" end
-
-            epSquare = (pu == "P" and math.abs(tr - fr) == 2) and RCToSq((fr + tr) / 2, fc) or "-"
-            board[fr][fc] = "."
-            if promo and promo ~= "" then
-                board[tr][tc] = isW and string.upper(promo) or string.lower(promo)
-            else
-                board[tr][tc] = p
-            end
-        end
-        whiteTurn = not whiteTurn
-    end
-
-    local outRows = {}
-    for r = 1, 8 do
-        local empty = 0
-        local s = ""
-        for c = 1, 8 do
-            local p = board[r][c]
-            if p == "." then
-                empty = empty + 1
-            else
-                if empty > 0 then s = s .. tostring(empty); empty = 0 end
-                s = s .. p
-            end
-        end
-        if empty > 0 then s = s .. tostring(empty) end
-        table.insert(outRows, s)
-    end
-
-    local side = whiteTurn and "w" or "b"
-    local fullMove = math.floor(#(ucis or {}) / 2) + 1
-    return string.format("%s %s %s %s 0 %d", table.concat(outRows, "/"), side, castling, epSquare, fullMove)
-end
-
--- 4. HỆ THỐNG AI ĐA LÕI: VORTEXBOT + BOT.ANALYSE + STOCKFISH 16 CLOUD (NON-BLOCKING)
-local httpRequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-
-local function FetchCloudMoveAsync(fen, depth, timeoutSec)
-    local done = false
-    local resultMove, resultScore, resultMate, resultSource = nil, 0, nil, nil
-
-    task.spawn(function()
-        local enc = HttpService:UrlEncode(fen)
-        local url = string.format("https://stockfish.online/api/s/v2.php?fen=%s&depth=%d", enc, math.min(depth, 15))
-        local ok, body = pcall(function()
-            if httpRequest then
-                local r = httpRequest({Url = url, Method = "GET"})
-                return r and r.Body
-            end
-            return game:HttpGet(url)
-        end)
-        if not done and ok and body then
-            local decOk, data = pcall(function() return HttpService:JSONDecode(body) end)
-            if decOk and data and data.success and data.bestmove then
-                local m = string.match(data.bestmove, "bestmove%s+([a-h][1-8][a-h][1-8][qrbn]?)")
-                if m then
-                    resultMove = m
-                    resultScore = tonumber(data.evaluation) or 0
-                    resultMate = data.mate
-                    resultSource = "Stockfish 16"
-                    done = true
-                end
-            end
-        end
-    end)
-
-    local t0 = os.clock()
-    while not done and (os.clock() - t0) < timeoutSec do
-        task.wait(0.03)
-    end
-    done = true
-    return resultMove, resultScore, resultMate, resultSource
-end
-
-local function ComputeBestMove(session)
-    local startFen = session.startFen or "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-    local moves = table.clone(session.ucis or {})
-
-    -- Ưu tiên 1: VortexBot.analyse (Server Engine Bridge của RoChess - Chuẩn 100% luật game, trả về res.best)
-    if VortexBot and typeof(VortexBot.analyse) == "function" then
-        local ok, res = pcall(VortexBot.analyse, startFen, moves, CFG.ThinkSeconds, CFG.MaxDepth)
-        if ok and type(res) == "table" and type(res.best) == "string" and #res.best >= 4 then
-            local cpScore = (tonumber(res.score) or 0) / 100
-            local d = tonumber(res.depth) or CFG.MaxDepth
-            return res.best, cpScore, res.mate, string.format("VortexBot D%d", d)
-        end
-    end
-
-    -- Ưu tiên 2: Stockfish 16 Cloud (Có giới hạn timeout 1.15s để không bao giờ treo máy)
-    local fen = BuildFEN(startFen, moves)
-    local sfMove, sfScore, sfMate, sfSrc = FetchCloudMoveAsync(fen, 14, CFG.CloudTimeout)
-    if sfMove then
-        return sfMove, sfScore, sfMate, sfSrc
-    end
-
-    -- Ưu tiên 3: Bot.analyse nội bộ của RoChess (Trả về res.best ngay cả khi mất mạng)
-    if Bot and typeof(Bot.analyse) == "function" then
-        local ok, res = pcall(Bot.analyse, startFen, moves, CFG.ThinkSeconds, CFG.MaxDepth)
-        if ok and type(res) == "table" and type(res.best) == "string" and #res.best >= 4 then
-            local cpScore = (tonumber(res.score) or 0) / 100
-            local d = tonumber(res.depth) or CFG.MaxDepth
-            return res.best, cpScore, res.mate, string.format("RoChess Engine D%d", d)
-        end
-    end
-
-    -- Ưu tiên 4: VortexBot.think / Bot.think trực tiếp
-    if VortexBot and typeof(VortexBot.think) == "function" then
-        local ok, uci = pcall(VortexBot.think, startFen, moves, CFG.ThinkSeconds, CFG.MaxDepth)
-        if ok and type(uci) == "string" and #uci >= 4 then
-            return uci, 0, nil, "VortexBot Think"
-        end
-    end
-    if Bot and typeof(Bot.think) == "function" then
-        local ok, uci = pcall(Bot.think, startFen, moves, CFG.ThinkSeconds, CFG.MaxDepth)
-        if ok and type(uci) == "string" and #uci >= 4 then
-            return uci, 0, nil, "RoChess Think"
-        end
-    end
-
-    return nil, 0, nil, "None"
-end
-
--- 5. VẼ MŨI TÊN ESP TRÊN BÀN CỜ & ĐI QUÂN TRỰC TIẾP QUA MODULE ROCHESS
-local function DrawBoardArrow(uci)
-    if not CFG.DrawArrow or not uci or #uci < 4 then return end
-    pcall(function()
-        if App.board and typeof(App.board.setArrow) == "function" then
-            local fromIdx = Engine.algToIndex64(string.sub(uci, 1, 2))
-            local toIdx = Engine.algToIndex64(string.sub(uci, 3, 4))
-            if fromIdx and toIdx then
-                App.board:setArrow("hint", fromIdx, toIdx, Color3.fromRGB(45, 235, 115), 0.15)
-            end
-        end
-    end)
-end
-
-local function ExecuteMoveNative(session, uci)
-    if not session or not uci or #uci < 4 then return false end
-    local beforePly = #(session.ucis or {})
-
-    -- Đồng bộ viewPly về nước hiện tại nếu đang xem lại lịch sử
-    pcall(function()
-        if session.viewPly and session.viewPly ~= beforePly then
-            session.viewPly = beforePly
-        end
-    end)
-
-    local fromSq = string.sub(uci, 1, 2)
-    local toSq = string.sub(uci, 3, 4)
-    local promoChar = string.lower(string.sub(uci, 5, 5) or "")
-    local promo = PROMO_CODE[promoChar]
-
-    local fromIdx = Engine.algToIndex64(fromSq)
-    local toIdx = Engine.algToIndex64(toSq)
-    if not fromIdx or not toIdx then return false end
-
-    -- Cách 1: Gọi chuẩn App.onBoardMove(from, to, promo, false) của RoChess!
-    pcall(function()
-        App.onBoardMove(fromIdx, toIdx, promo, false)
-    end)
-    task.wait(0.06)
-    if #(session.ucis or {}) > beforePly then return true end
-
-    -- Cách 2: Gọi trực tiếp session:playMove(uci)
-    pcall(function()
-        if typeof(session.playMove) == "function" then
-            session:playMove(uci)
-        end
-    end)
-    task.wait(0.06)
-    if #(session.ucis or {}) > beforePly then return true end
-
-    -- Cách 3: Gọi App.playMove(uci)
-    pcall(function()
-        if typeof(App.playMove) == "function" then
-            App.playMove(uci)
-        end
-    end)
-    task.wait(0.06)
-
-    return #(session.ucis or {}) > beforePly
-end
-
--- 6. GIAO DIỆN HUD GỌN Ở MÉP TRÊN (KHÔNG CHE BÀN CỜ & BIÊN BẢN)
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "RoChessAI_v4"
+ScreenGui.Name = "MonicaHub_UI"
 ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = ParentGui
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = SafeParent
 
-local MainHud = Instance.new("Frame")
-MainHud.Size = UDim2.new(0, 315, 0, 66)
-MainHud.Position = UDim2.new(0.5, -157, 0.008, 0)
-MainHud.BackgroundColor3 = Color3.fromRGB(15, 17, 23)
-MainHud.BackgroundTransparency = 0.06
-MainHud.BorderSizePixel = 0
-MainHud.Active = true
-MainHud.Draggable = true
-MainHud.Parent = ScreenGui
-Instance.new("UICorner", MainHud).CornerRadius = UDim.new(0, 8)
+-- // TẠO KÉO THẢ CHO UI (DRAGGABLE)
+local function MakeDraggable(dragHandle, targetFrame)
+    local dragging = false
+    local dragInput, dragStart, startPos
 
-local UiStroke = Instance.new("UIStroke", MainHud)
-UiStroke.Color = Color3.fromRGB(45, 225, 115)
-UiStroke.Thickness = 1.6
+    dragHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = targetFrame.Position
 
-local TopLabel = Instance.new("TextLabel")
-TopLabel.Size = UDim2.new(0.71, -8, 0, 35)
-TopLabel.Position = UDim2.new(0, 9, 0, 4)
-TopLabel.BackgroundTransparency = 1
-TopLabel.Text = "⚡ RoChess AI v4.0 [VORTEX + SF16]\nĐã dọn sạch bản cũ, sẵn sàng!"
-TopLabel.TextColor3 = Color3.fromRGB(240, 248, 255)
-TopLabel.Font = Enum.Font.GothamBold
-TopLabel.TextSize = 11
-TopLabel.TextXAlignment = Enum.TextXAlignment.Left
-TopLabel.TextWrapped = true
-TopLabel.Parent = MainHud
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
 
-local SubLabel = Instance.new("TextLabel")
-SubLabel.Size = UDim2.new(0.96, -10, 0, 22)
-SubLabel.Position = UDim2.new(0, 9, 0, 41)
-SubLabel.BackgroundTransparency = 1
-SubLabel.Text = "Tự động phân tích lỗi đối thủ & đánh thắng từ đầu tới cuối"
-SubLabel.TextColor3 = Color3.fromRGB(110, 240, 150)
-SubLabel.Font = Enum.Font.GothamMedium
-SubLabel.TextSize = 10
-SubLabel.TextXAlignment = Enum.TextXAlignment.Left
-SubLabel.TextWrapped = true
-SubLabel.Parent = MainHud
+    dragHandle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
 
-local ToggleBtn = Instance.new("TextButton")
-ToggleBtn.Size = UDim2.new(0.26, 0, 0, 30)
-ToggleBtn.Position = UDim2.new(0.72, 0, 0, 6)
-ToggleBtn.BackgroundColor3 = Color3.fromRGB(35, 175, 90)
-ToggleBtn.Text = "AUTO: ON"
-ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-ToggleBtn.Font = Enum.Font.GothamBold
-ToggleBtn.TextSize = 11
-ToggleBtn.Parent = MainHud
-Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            targetFrame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
 
-ToggleBtn.MouseButton1Click:Connect(function()
-    CFG.AutoPlay = not CFG.AutoPlay
-    ToggleBtn.Text = CFG.AutoPlay and "AUTO: ON" or "AUTO: OFF"
-    ToggleBtn.BackgroundColor3 = CFG.AutoPlay and Color3.fromRGB(35, 175, 90) or Color3.fromRGB(70, 75, 88)
-    UiStroke.Color = CFG.AutoPlay and Color3.fromRGB(45, 225, 115) or Color3.fromRGB(130, 130, 145)
+-- // 1. NÚT ẨN / HIỆN MENU DẠNG PILL (THEO ẢNH KHOANH ĐỎ)
+local TogglePill = Instance.new("TextButton")
+TogglePill.Name = "TogglePill"
+TogglePill.Size = UDim2.new(0, 128, 0, 38)
+TogglePill.Position = UDim2.new(0.5, -64, 0.06, 0)
+TogglePill.BackgroundColor3 = Color3.fromRGB(28, 30, 34)
+TogglePill.BackgroundTransparency = 0.12
+TogglePill.Text = ""
+TogglePill.AutoButtonColor = false
+TogglePill.Parent = ScreenGui
+
+local PillCorner = Instance.new("UICorner")
+PillCorner.CornerRadius = UDim.new(1, 0)
+PillCorner.Parent = TogglePill
+
+local PillStroke = Instance.new("UIStroke")
+PillStroke.Color = Color3.fromRGB(65, 70, 80)
+PillStroke.Thickness = 1.2
+PillStroke.Parent = TogglePill
+
+local PillAvatar = Instance.new("Frame")
+PillAvatar.Size = UDim2.new(0, 30, 0, 30)
+PillAvatar.Position = UDim2.new(0, 4, 0.5, -15)
+PillAvatar.BackgroundColor3 = Color3.fromRGB(45, 115, 215)
+PillAvatar.Parent = TogglePill
+
+local AvatarCorner = Instance.new("UICorner")
+AvatarCorner.CornerRadius = UDim.new(1, 0)
+AvatarCorner.Parent = PillAvatar
+
+local AvatarLabel = Instance.new("TextLabel")
+AvatarLabel.Size = UDim2.new(1, 0, 1, 0)
+AvatarLabel.BackgroundTransparency = 1
+AvatarLabel.Text = "M"
+AvatarLabel.TextColor3 = Color3.fromRGB(255, 215, 90)
+AvatarLabel.Font = Enum.Font.GothamBlack
+AvatarLabel.TextSize = 16
+AvatarLabel.Parent = PillAvatar
+
+local PillFPSLabel = Instance.new("TextLabel")
+PillFPSLabel.Size = UDim2.new(1, -42, 1, 0)
+PillFPSLabel.Position = UDim2.new(0, 38, 0, 0)
+PillFPSLabel.BackgroundTransparency = 1
+PillFPSLabel.RichText = true
+PillFPSLabel.Text = '<font color="#35e060">60.0</font> <font color="#d8d8d8">fps</font>'
+PillFPSLabel.Font = Enum.Font.GothamBold
+PillFPSLabel.TextSize = 14
+PillFPSLabel.TextXAlignment = Enum.TextXAlignment.Left
+PillFPSLabel.Parent = TogglePill
+
+MakeDraggable(TogglePill, TogglePill)
+
+-- // 2. CỬA SỔ CHÍNH MONICA HUB (PHONG CÁCH MACOS DARK NHƯ ẢNH MẪU)
+local MainWindow = Instance.new("Frame")
+MainWindow.Name = "MainWindow"
+MainWindow.Size = UDim2.new(0, 490, 0, 305)
+MainWindow.Position = UDim2.new(0.5, -245, 0.5, -152)
+MainWindow.BackgroundColor3 = Color3.fromRGB(26, 28, 32)
+MainWindow.BorderSizePixel = 0
+MainWindow.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 8)
+MainCorner.Parent = MainWindow
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Color3.fromRGB(58, 62, 70)
+MainStroke.Thickness = 1
+MainStroke.Parent = MainWindow
+
+-- Thanh tiêu đề (TopBar)
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 34)
+TopBar.BackgroundColor3 = Color3.fromRGB(32, 34, 39)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainWindow
+
+local TopBarCorner = Instance.new("UICorner")
+TopBarCorner.CornerRadius = UDim.new(0, 8)
+TopBarCorner.Parent = TopBar
+
+local TopBarFix = Instance.new("Frame")
+TopBarFix.Size = UDim2.new(1, 0, 0, 8)
+TopBarFix.Position = UDim2.new(0, 0, 1, -8)
+TopBarFix.BackgroundColor3 = Color3.fromRGB(32, 34, 39)
+TopBarFix.BorderSizePixel = 0
+TopBarFix.Parent = TopBar
+
+-- 3 nút tròn Đỏ - Vàng - Xanh lá góc trái
+local TrafficDots = {
+    {Color = Color3.fromRGB(255, 95, 86), Offset = 12},
+    {Color = Color3.fromRGB(255, 189, 46), Offset = 30},
+    {Color = Color3.fromRGB(39, 201, 63), Offset = 48}
+}
+for _, dotInfo in ipairs(TrafficDots) do
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.new(0, 11, 0, 11)
+    dot.Position = UDim2.new(0, dotInfo.Offset, 0.5, -5)
+    dot.BackgroundColor3 = dotInfo.Color
+    dot.BorderSizePixel = 0
+    dot.Parent = TopBar
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(1, 0)
+    c.Parent = dot
+end
+
+local HeaderTitle = Instance.new("TextLabel")
+HeaderTitle.Size = UDim2.new(1, -130, 1, 0)
+HeaderTitle.Position = UDim2.new(0, 75, 0, 0)
+HeaderTitle.BackgroundTransparency = 1
+HeaderTitle.RichText = true
+HeaderTitle.Text = '<font color="#e6c84f">Monica Hub [Killstreak BR]</font>  <font color="#8a909e">|  FPS:</font> <font color="#35e060">60.0</font>'
+HeaderTitle.Font = Enum.Font.GothamBold
+HeaderTitle.TextSize = 13
+HeaderTitle.TextXAlignment = Enum.TextXAlignment.Left
+HeaderTitle.Parent = TopBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+CloseBtn.Position = UDim2.new(1, -34, 0.5, -14)
+CloseBtn.BackgroundTransparency = 1
+CloseBtn.Text = "⏻"
+CloseBtn.TextColor3 = Color3.fromRGB(165, 170, 180)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 15
+CloseBtn.Parent = TopBar
+
+MakeDraggable(TopBar, MainWindow)
+
+-- Cột Sidebar bên trái
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.new(0, 125, 1, -34)
+Sidebar.Position = UDim2.new(0, 0, 0, 34)
+Sidebar.BackgroundColor3 = Color3.fromRGB(23, 25, 29)
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = MainWindow
+
+local SideTab = Instance.new("Frame")
+SideTab.Size = UDim2.new(1, -12, 0, 32)
+SideTab.Position = UDim2.new(0, 6, 0, 12)
+SideTab.BackgroundColor3 = Color3.fromRGB(40, 44, 52)
+SideTab.BorderSizePixel = 0
+SideTab.Parent = Sidebar
+
+local SideTabCorner = Instance.new("UICorner")
+SideTabCorner.CornerRadius = UDim.new(0, 5)
+SideTabCorner.Parent = SideTab
+
+local SideBarAccent = Instance.new("Frame")
+SideBarAccent.Size = UDim2.new(0, 3, 0, 18)
+SideBarAccent.Position = UDim2.new(0, 3, 0.5, -9)
+SideBarAccent.BackgroundColor3 = Color3.fromRGB(55, 130, 240)
+SideBarAccent.BorderSizePixel = 0
+SideBarAccent.Parent = SideTab
+
+local SideTabText = Instance.new("TextLabel")
+SideTabText.Size = UDim2.new(1, -16, 1, 0)
+SideTabText.Position = UDim2.new(0, 12, 0, 0)
+SideTabText.BackgroundTransparency = 1
+SideTabText.Text = "Esp & Aim"
+SideTabText.TextColor3 = Color3.fromRGB(235, 240, 245)
+SideTabText.Font = Enum.Font.GothamSemibold
+SideTabText.TextSize = 13
+SideTabText.TextXAlignment = Enum.TextXAlignment.Left
+SideTabText.Parent = SideTab
+
+local SideInfo = Instance.new("TextLabel")
+SideInfo.Size = UDim2.new(1, -16, 0, 50)
+SideInfo.Position = UDim2.new(0, 10, 1, -56)
+SideInfo.BackgroundTransparency = 1
+SideInfo.Text = "Monica Hub v1.0\nKillstreak BR"
+SideInfo.TextColor3 = Color3.fromRGB(115, 120, 130)
+SideInfo.Font = Enum.Font.Gotham
+SideInfo.TextSize = 11
+SideInfo.TextXAlignment = Enum.TextXAlignment.Left
+SideInfo.Parent = Sidebar
+
+-- Vùng nội dung bên phải
+local ContentArea = Instance.new("Frame")
+ContentArea.Size = UDim2.new(1, -125, 1, -34)
+ContentArea.Position = UDim2.new(0, 125, 0, 34)
+ContentArea.BackgroundTransparency = 1
+ContentArea.Parent = MainWindow
+
+-- Thanh Sub-Tab (Draw Esp / Aimbot / All)
+local SubTabBar = Instance.new("Frame")
+SubTabBar.Size = UDim2.new(1, -24, 0, 30)
+SubTabBar.Position = UDim2.new(0, 12, 0, 10)
+SubTabBar.BackgroundTransparency = 1
+SubTabBar.Parent = ContentArea
+
+local function CreateSubTabButton(text, posX, width)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, width, 0, 28)
+    btn.Position = UDim2.new(0, posX, 0, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(48, 112, 205)
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(245, 248, 255)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 12
+    btn.AutoButtonColor = false
+    btn.Parent = SubTabBar
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = btn
+    return btn
+end
+
+local TabAllBtn = CreateSubTabButton("All Features", 0, 92)
+local TabEspBtn = CreateSubTabButton("Draw Esp", 98, 82)
+local TabAimBtn = CreateSubTabButton("Aimbot", 186, 72)
+
+-- Khung chứa các công tắc
+local SwitchContainer = Instance.new("Frame")
+SwitchContainer.Size = UDim2.new(1, -24, 1, -48)
+SwitchContainer.Position = UDim2.new(0, 12, 0, 44)
+SwitchContainer.BackgroundTransparency = 1
+SwitchContainer.Parent = ContentArea
+
+local SectionLabel = Instance.new("TextLabel")
+SectionLabel.Size = UDim2.new(1, 0, 0, 18)
+SectionLabel.Position = UDim2.new(0, 0, 0, 0)
+SectionLabel.BackgroundTransparency = 1
+SectionLabel.Text = "Switch — ESP & Aimbot"
+SectionLabel.TextColor3 = Color3.fromRGB(155, 160, 170)
+SectionLabel.Font = Enum.Font.GothamSemibold
+SectionLabel.TextSize = 12
+SectionLabel.TextXAlignment = Enum.TextXAlignment.Left
+SectionLabel.Parent = SwitchContainer
+
+-- Hàm tạo Checkbox giống ảnh mẫu (ô vuông xanh có dấu tích)
+local function CreateCheckbox(labelText, posX, posY, defaultState, callback)
+    local holder = Instance.new("TextButton")
+    holder.Size = UDim2.new(0, 165, 0, 28)
+    holder.Position = UDim2.new(0, posX, 0, posY)
+    holder.BackgroundTransparency = 1
+    holder.Text = ""
+    holder.Parent = SwitchContainer
+
+    local box = Instance.new("Frame")
+    box.Size = UDim2.new(0, 20, 0, 20)
+    box.Position = UDim2.new(0, 0, 0.5, -10)
+    box.BackgroundColor3 = defaultState and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(42, 45, 52)
+    box.BorderSizePixel = 0
+    box.Parent = holder
+
+    local boxCorner = Instance.new("UICorner")
+    boxCorner.CornerRadius = UDim.new(0, 4)
+    boxCorner.Parent = box
+
+    local checkIcon = Instance.new("TextLabel")
+    checkIcon.Size = UDim2.new(1, 0, 1, 0)
+    checkIcon.BackgroundTransparency = 1
+    checkIcon.Text = defaultState and "✓" or ""
+    checkIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+    checkIcon.Font = Enum.Font.GothamBold
+    checkIcon.TextSize = 14
+    checkIcon.Parent = box
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -28, 1, 0)
+    title.Position = UDim2.new(0, 28, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = labelText
+    title.TextColor3 = Color3.fromRGB(220, 224, 232)
+    title.Font = Enum.Font.Gotham
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = holder
+
+    local state = defaultState
+    holder.MouseButton1Click:Connect(function()
+        state = not state
+        box.BackgroundColor3 = state and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(42, 45, 52)
+        checkIcon.Text = state and "✓" or ""
+        callback(state)
+    end)
+
+    return holder
+end
+
+-- Cột trái: Các chức năng ESP
+local EspBoxToggle = CreateCheckbox("Định vị hộp 2D", 0, 24, false, function(val)
+    Config.ESP.Box2D = val
 end)
 
--- 7. VÒNG LẶP CHÍNH: THEO DÕI SESSION, VẼ MŨI TÊN & TỰ ĐÁNH THẮNG
-local LastSession = nil
-local LastEvaluatedPly = -1
-local PrevScore = 0
+local EspHealthToggle = CreateCheckbox("Lượng máu đối thủ", 0, 56, false, function(val)
+    Config.ESP.Health = val
+end)
 
-task.spawn(function()
-    while Running and task.wait(0.18) do
-        local session = App.session
-        if not session or session.over or session.kind == "idle" then
-            TopLabel.Text = "⚡ RoChess AI v4.0 [VORTEX + SF16]\nĐang đợi bắt đầu ván đấu..."
-        else
-            if session ~= LastSession then
-                LastSession = session
-                LastEvaluatedPly = -1
-                PrevScore = 0
+local EspDistToggle = CreateCheckbox("Khoảng cách địch", 0, 88, false, function(val)
+    Config.ESP.Distance = val
+end)
+
+local EspFovToggle = CreateCheckbox("ESP vòng Aim (Hiện/Ẩn)", 0, 120, false, function(val)
+    Config.ESP.ShowFOV = val
+end)
+
+-- Cột phải: Các chức năng Aimbot
+local AimHeadToggle = CreateCheckbox("Aim đầu địch (Gần tâm)", 175, 24, false, function(val)
+    Config.Aim.Enabled = val
+end)
+
+local AimVisToggle = CreateCheckbox("Check vật cản (Sau tường)", 175, 56, true, function(val)
+    Config.Aim.VisibleCheck = val
+end)
+
+-- Nhãn trạng thái nút bắn thời gian thực
+local ShootStateLabel = Instance.new("TextLabel")
+ShootStateLabel.Size = UDim2.new(0, 165, 0, 24)
+ShootStateLabel.Position = UDim2.new(0, 175, 0, 90)
+ShootStateLabel.BackgroundTransparency = 1
+ShootStateLabel.RichText = true
+ShootStateLabel.Text = 'Trạng thái bắn: <font color="#9096a4">Đang thả</font>'
+ShootStateLabel.Font = Enum.Font.GothamSemibold
+ShootStateLabel.TextSize = 11
+ShootStateLabel.TextXAlignment = Enum.TextXAlignment.Left
+ShootStateLabel.Parent = SwitchContainer
+
+-- Thanh trượt chỉnh Vòng FOV (Fox)
+local SettingsDivider = Instance.new("Frame")
+SettingsDivider.Size = UDim2.new(1, 0, 0, 1)
+SettingsDivider.Position = UDim2.new(0, 0, 0, 154)
+SettingsDivider.BackgroundColor3 = Color3.fromRGB(45, 48, 55)
+SettingsDivider.BorderSizePixel = 0
+SettingsDivider.Parent = SwitchContainer
+
+local SliderTitle = Instance.new("TextLabel")
+SliderTitle.Size = UDim2.new(1, 0, 0, 20)
+SliderTitle.Position = UDim2.new(0, 0, 0, 160)
+SliderTitle.BackgroundTransparency = 1
+SliderTitle.Text = "Chỉnh vòng Fox (FOV): " .. tostring(Config.Aim.FOVRadius)
+SliderTitle.TextColor3 = Color3.fromRGB(220, 224, 232)
+SliderTitle.Font = Enum.Font.GothamSemibold
+SliderTitle.TextSize = 12
+SliderTitle.TextXAlignment = Enum.TextXAlignment.Left
+SliderTitle.Parent = SwitchContainer
+
+local SliderBack = Instance.new("Frame")
+SliderBack.Size = UDim2.new(1, -10, 0, 10)
+SliderBack.Position = UDim2.new(0, 0, 0, 186)
+SliderBack.BackgroundColor3 = Color3.fromRGB(42, 45, 52)
+SliderBack.BorderSizePixel = 0
+SliderBack.Parent = SwitchContainer
+
+local SliderBackCorner = Instance.new("UICorner")
+SliderBackCorner.CornerRadius = UDim.new(1, 0)
+SliderBackCorner.Parent = SliderBack
+
+local SliderFill = Instance.new("Frame")
+SliderFill.Size = UDim2.new((Config.Aim.FOVRadius - 20) / 280, 0, 1, 0)
+SliderFill.BackgroundColor3 = Color3.fromRGB(48, 112, 205)
+SliderFill.BorderSizePixel = 0
+SliderFill.Parent = SliderBack
+
+local SliderFillCorner = Instance.new("UICorner")
+SliderFillCorner.CornerRadius = UDim.new(1, 0)
+SliderFillCorner.Parent = SliderFill
+
+local SliderKnob = Instance.new("Frame")
+SliderKnob.Size = UDim2.new(0, 16, 0, 16)
+SliderKnob.Position = UDim2.new(1, -8, 0.5, -8)
+SliderKnob.BackgroundColor3 = Color3.fromRGB(240, 245, 255)
+SliderKnob.BorderSizePixel = 0
+SliderKnob.Parent = SliderFill
+
+local KnobCorner = Instance.new("UICorner")
+KnobCorner.CornerRadius = UDim.new(1, 0)
+KnobCorner.Parent = SliderKnob
+
+-- Logic kéo thanh trượt FOV (từ 20 đến 300px)
+local draggingSlider = false
+local function UpdateSliderFromInput(input)
+    local absPos = SliderBack.AbsolutePosition.X
+    local absSize = SliderBack.AbsoluteSize.X
+    local rel = math.clamp((input.Position.X - absPos) / absSize, 0, 1)
+    local value = math.floor(20 + rel * 280)
+    Config.Aim.FOVRadius = value
+    SliderFill.Size = UDim2.new(rel, 0, 1, 0)
+    SliderTitle.Text = "Chỉnh vòng Fox (FOV): " .. tostring(value)
+end
+
+SliderBack.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingSlider = true
+        UpdateSliderFromInput(input)
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingSlider = false
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        UpdateSliderFromInput(input)
+    end
+end)
+
+-- Chuyển đổi bộ lọc hiển thị Tab
+local function SetTabFilter(mode)
+    TabAllBtn.BackgroundColor3 = (mode == "ALL") and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(38, 42, 49)
+    TabEspBtn.BackgroundColor3 = (mode == "ESP") and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(38, 42, 49)
+    TabAimBtn.BackgroundColor3 = (mode == "AIM") and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(38, 42, 49)
+
+    local showEsp = (mode == "ALL" or mode == "ESP")
+    local showAim = (mode == "ALL" or mode == "AIM")
+
+    EspBoxToggle.Visible = showEsp
+    EspHealthToggle.Visible = showEsp
+    EspDistToggle.Visible = showEsp
+    EspFovToggle.Visible = showEsp
+
+    AimHeadToggle.Visible = showAim
+    AimVisToggle.Visible = showAim
+    ShootStateLabel.Visible = showAim
+end
+
+TabAllBtn.MouseButton1Click:Connect(function() SetTabFilter("ALL") end)
+TabEspBtn.MouseButton1Click:Connect(function() SetTabFilter("ESP") end)
+TabAimBtn.MouseButton1Click:Connect(function() SetTabFilter("AIM") end)
+SetTabFilter("ALL")
+
+-- Bật / Tắt hiển thị cửa sổ menu qua nút Pill hoặc nút nguồn
+local function ToggleMenuVisibility()
+    Config.MenuOpen = not Config.MenuOpen
+    MainWindow.Visible = Config.MenuOpen
+end
+
+TogglePill.MouseButton1Click:Connect(ToggleMenuVisibility)
+CloseBtn.MouseButton1Click:Connect(ToggleMenuVisibility)
+
+-- // 3. VÒNG FOV TRÊN MÀN HÌNH (ESP VÒNG AIM)
+local FOVCircleFrame = Instance.new("Frame")
+FOVCircleFrame.Name = "FOVCircle"
+FOVCircleFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+FOVCircleFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+FOVCircleFrame.Size = UDim2.new(0, Config.Aim.FOVRadius * 2, 0, Config.Aim.FOVRadius * 2)
+FOVCircleFrame.BackgroundTransparency = 1
+FOVCircleFrame.Visible = false
+FOVCircleFrame.Parent = ScreenGui
+
+local FOVCorner = Instance.new("UICorner")
+FOVCorner.CornerRadius = UDim.new(1, 0)
+FOVCorner.Parent = FOVCircleFrame
+
+local FOVStroke = Instance.new("UIStroke")
+FOVStroke.Color = Color3.fromRGB(255, 255, 255)
+FOVStroke.Thickness = 1.5
+FOVStroke.Transparency = 0.15
+FOVStroke.Parent = FOVCircleFrame
+
+-- // 4. NHẬN DIỆN ẤN GIỮ NÚT BẮN TRONG KILLSTREAK BATTLE ROYALE (MOBILE + PC)
+local function IsPointOverShootControl(screenPos)
+    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if pGui then
+        local guiObjects = pGui:GetGuiObjectsAtPosition(screenPos.X, screenPos.Y)
+        for _, obj in ipairs(guiObjects) do
+            if obj.Visible and not obj:IsDescendantOf(ScreenGui) then
+                local nameLower = string.lower(obj.Name)
+                local parentLower = obj.Parent and string.lower(obj.Parent.Name) or ""
+                if string.find(nameLower, "fire")
+                    or string.find(nameLower, "shoot")
+                    or string.find(nameLower, "attack")
+                    or string.find(nameLower, "bullet")
+                    or string.find(parentLower, "fire")
+                    or string.find(parentLower, "shoot")
+                    or string.find(parentLower, "attack") then
+                    return true
+                end
             end
+        end
+    end
 
-            local ucis = session.ucis or {}
-            local plyCount = #ucis
-            local myColorName = (session.myColor == 1) and "TRẮNG" or "ĐEN"
-            local okTurn, isMyTurn = pcall(function() return session:isMyTurn() end)
+    -- Vùng nút bắn mặc định bên phải màn hình của Killstreak Battle Royale (theo bố cục nút viên đạn/dao trên video)
+    local vp = Camera.ViewportSize
+    local normX = screenPos.X / vp.X
+    local normY = screenPos.Y / vp.Y
+    if normX >= 0.62 and normX <= 0.96 and normY >= 0.36 and normY <= 0.88 then
+        return true
+    end
+    return false
+end
 
-            if okTurn and isMyTurn then
-                local bestMove, score, mate, srcName = ComputeBestMove(session)
+local function SetShootingState(active)
+    IsShooting = active
+    if active then
+        ShootStateLabel.Text = 'Trạng thái bắn: <font color="#35e060">Đang giữ bắn</font>'
+        FOVStroke.Color = Color3.fromRGB(55, 230, 95)
+    else
+        ShootStateLabel.Text = 'Trạng thái bắn: <font color="#9096a4">Đang thả</font>'
+        FOVStroke.Color = Color3.fromRGB(255, 255, 255)
+    end
+end
 
-                if bestMove and Running and App.session == session and #(session.ucis or {}) == plyCount then
-                    DrawBoardArrow(bestMove)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if Config.MenuOpen and MainWindow.Visible then
+        local mPos = input.Position
+        local wPos = MainWindow.AbsolutePosition
+        local wSize = MainWindow.AbsoluteSize
+        if mPos.X >= wPos.X and mPos.X <= (wPos.X + wSize.X) and mPos.Y >= wPos.Y and mPos.Y <= (wPos.Y + wSize.Y) then
+            return
+        end
+    end
 
-                    local scoreStr = mate and ("Mate #" .. tostring(mate)) or string.format("%+.2f", score)
-                    TopLabel.Text = string.format(
-                        "Quân: %s | %s (%s)\nNước đi: %s -> %s",
-                        myColorName, srcName, scoreStr,
-                        string.sub(bestMove, 1, 2), string.sub(bestMove, 3, 4)
-                    )
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if not gameProcessed or IsPointOverShootControl(input.Position) then
+            SetShootingState(true)
+        end
+    elseif input.UserInputType == Enum.UserInputType.Touch then
+        if IsPointOverShootControl(input.Position) then
+            ActiveTouch = input
+            SetShootingState(true)
+        end
+    end
+end)
 
-                    if plyCount > 0 and LastEvaluatedPly ~= plyCount then
-                        LastEvaluatedPly = plyCount
-                        local oppLast = ucis[plyCount] or "?"
-                        local diff = math.abs(score - PrevScore)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        SetShootingState(false)
+    elseif input.UserInputType == Enum.UserInputType.Touch then
+        if ActiveTouch == nil or input == ActiveTouch then
+            ActiveTouch = nil
+            SetShootingState(false)
+        end
+    end
+end)
 
-                        if mate then
-                            SubLabel.Text = string.format("🔥 Đối thủ đi %s -> Đã khóa chuỗi CHIẾU HẾT bằng %s!", oppLast, bestMove)
-                            SubLabel.TextColor3 = Color3.fromRGB(85, 255, 135)
-                        elseif diff >= 1.8 then
-                            SubLabel.Text = string.format("🔥 BLUNDER từ đối thủ (%s)! Trừng phạt bằng %s", oppLast, bestMove)
-                            SubLabel.TextColor3 = Color3.fromRGB(85, 255, 135)
-                        elseif diff >= 0.75 then
-                            SubLabel.Text = string.format("⚠️ Đối thủ đi yếu (%s) -> Khai thác bằng %s", oppLast, bestMove)
-                            SubLabel.TextColor3 = Color3.fromRGB(255, 215, 85)
-                        else
-                            SubLabel.Text = string.format("Đối thủ đi %s -> Phản đòn tối ưu: %s", oppLast, bestMove)
-                            SubLabel.TextColor3 = Color3.fromRGB(175, 225, 255)
-                        end
-                        PrevScore = score
-                    end
+-- // 5. HỆ THỐNG ĐỊNH VỊ ESP 2D (HỘP 2D, THANH MÁU, KHOẢNG CÁCH)
+local ESPContainer = Instance.new("Folder")
+ESPContainer.Name = "ESPContainer"
+ESPContainer.Parent = ScreenGui
 
-                    if CFG.AutoPlay then
-                        local waitSec = CFG.MoveDelayMin + math.random() * (CFG.MoveDelayMax - CFG.MoveDelayMin)
-                        task.wait(waitSec)
-                        if Running and App.session == session and #(session.ucis or {}) == plyCount then
-                            ExecuteMoveNative(session, bestMove)
+local ESPCache = {}
+
+local function CreateESPNode(model)
+    if ESPCache[model] then return ESPCache[model] end
+
+    local node = {}
+
+    local box = Instance.new("Frame")
+    box.Name = "Box2D"
+    box.BackgroundTransparency = 1
+    box.BorderSizePixel = 0
+    box.Visible = false
+    box.Parent = ESPContainer
+
+    local boxOutline = Instance.new("UIStroke")
+    boxOutline.Color = Color3.fromRGB(255, 65, 65)
+    boxOutline.Thickness = 1.5
+    boxOutline.Parent = box
+
+    local healthBg = Instance.new("Frame")
+    healthBg.Name = "HealthBarBG"
+    healthBg.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    healthBg.BorderSizePixel = 0
+    healthBg.Visible = false
+    healthBg.Parent = ESPContainer
+
+    local healthFill = Instance.new("Frame")
+    healthFill.Name = "Fill"
+    healthFill.AnchorPoint = Vector2.new(0, 1)
+    healthFill.Position = UDim2.new(0, 0, 1, 0)
+    healthFill.Size = UDim2.new(1, 0, 1, 0)
+    healthFill.BackgroundColor3 = Color3.fromRGB(50, 235, 80)
+    healthFill.BorderSizePixel = 0
+    healthFill.Parent = healthBg
+
+    local infoText = Instance.new("TextLabel")
+    infoText.Name = "InfoLabel"
+    infoText.Size = UDim2.new(0, 140, 0, 16)
+    infoText.AnchorPoint = Vector2.new(0.5, 1)
+    infoText.BackgroundTransparency = 1
+    infoText.Font = Enum.Font.GothamBold
+    infoText.TextSize = 11
+    infoText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    infoText.TextStrokeTransparency = 0.2
+    infoText.Visible = false
+    infoText.Parent = ESPContainer
+
+    node.Box = box
+    node.BoxStroke = boxOutline
+    node.HealthBG = healthBg
+    node.HealthFill = healthFill
+    node.InfoLabel = infoText
+
+    ESPCache[model] = node
+    return node
+end
+
+local function RemoveESPNode(model)
+    local node = ESPCache[model]
+    if node then
+        if node.Box then node.Box:Destroy() end
+        if node.HealthBG then node.HealthBG:Destroy() end
+        if node.InfoLabel then node.InfoLabel:Destroy() end
+        ESPCache[model] = nil
+    end
+end
+
+-- Lấy danh sách tất cả mục tiêu địch (Bao gồm cả người chơi thật và Bot trong Killstreak BR)
+local function GetEnemyCharacters()
+    local enemies = {}
+    local seen = {}
+    local myChar = LocalPlayer.Character
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local char = plr.Character
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local head = char:FindFirstChild("Head")
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if hum and head and root and hum.Health > 0 then
+                seen[char] = true
+                table.insert(enemies, char)
+            end
+        end
+    end
+
+    -- Quét thêm các thư mục Bot trong Killstreak Battle Royale nếu có
+    for _, child in ipairs(Workspace:GetChildren()) do
+        if child:IsA("Model") and child ~= myChar and not seen[child] then
+            local hum = child:FindFirstChildOfClass("Humanoid")
+            local head = child:FindFirstChild("Head")
+            local root = child:FindFirstChild("HumanoidRootPart")
+            if hum and head and root and hum.Health > 0 then
+                seen[child] = true
+                table.insert(enemies, child)
+            end
+        elseif child:IsA("Folder") then
+            local folderName = string.lower(child.Name)
+            if string.find(folderName, "bot") or string.find(folderName, "player") or string.find(folderName, "enem") or string.find(folderName, "char") then
+                for _, sub in ipairs(child:GetChildren()) do
+                    if sub:IsA("Model") and sub ~= myChar and not seen[sub] then
+                        local hum = sub:FindFirstChildOfClass("Humanoid")
+                        local head = sub:FindFirstChild("Head")
+                        local root = sub:FindFirstChild("HumanoidRootPart")
+                        if hum and head and root and hum.Health > 0 then
+                            seen[sub] = true
+                            table.insert(enemies, sub)
                         end
                     end
                 end
-            else
-                TopLabel.Text = string.format(
-                    "Quân: %s | Đang đợi đối thủ đi...\nSố nước đã đi: %d",
-                    myColorName, plyCount
-                )
             end
         end
+    end
+
+    return enemies
+end
+
+-- // 6. KIỂM TRA VẬT CẢN (RAYCAST VISIBILITY CHECK)
+local function HasClearLineOfSight(targetPart, targetCharacter)
+    if not Config.Aim.VisibleCheck then
+        return true
+    end
+
+    local origin = Camera.CFrame.Position
+    local direction = targetPart.Position - origin
+    if direction.Magnitude < 1 then
+        return true
+    end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    local ignoreList = {Camera}
+    if LocalPlayer.Character then
+        table.insert(ignoreList, LocalPlayer.Character)
+    end
+    rayParams.FilterDescendantsInstances = ignoreList
+    rayParams.IgnoreWater = true
+
+    local result = Workspace:Raycast(origin, direction, rayParams)
+    if not result then
+        return true
+    end
+
+    if result.Instance and result.Instance:IsDescendantOf(targetCharacter) then
+        return true
+    end
+
+    return false
+end
+
+-- // 7. VÒNG LẶP CHÍNH: FPS, CẬP NHẬT ESP, VÀ AIMBOT KHI GIỮ NÚT BẮN
+local frameCount = 0
+local lastFPSTime = os.clock()
+
+RunService.RenderStepped:Connect(function()
+    Camera = Workspace.CurrentCamera
+    if not Camera then return end
+
+    -- Cập nhật bộ đếm FPS
+    frameCount = frameCount + 1
+    local now = os.clock()
+    if now - lastFPSTime >= 0.4 then
+        local currentFPS = math.clamp(frameCount / (now - lastFPSTime), 1, 999)
+        local fpsStr = string.format("%.1f", currentFPS)
+        PillFPSLabel.Text = string.format('<font color="#35e060">%s</font> <font color="#d8d8d8">fps</font>', fpsStr)
+        HeaderTitle.Text = string.format('<font color="#e6c84f">Monica Hub [Killstreak BR]</font>  <font color="#8a909e">|  FPS:</font> <font color="#35e060">%s</font>', fpsStr)
+        frameCount = 0
+        lastFPSTime = now
+    end
+
+    -- Cập nhật vòng FOV (co giãn trực tiếp theo thanh chỉnh Fox)
+    local screenCenter = Vector2.new(Camera.ViewportSize.X * 0.5, Camera.ViewportSize.Y * 0.5)
+    FOVCircleFrame.Position = UDim2.new(0, screenCenter.X, 0, screenCenter.Y)
+    FOVCircleFrame.Size = UDim2.new(0, Config.Aim.FOVRadius * 2, 0, Config.Aim.FOVRadius * 2)
+    FOVCircleFrame.Visible = Config.ESP.ShowFOV
+
+    local activeEnemies = GetEnemyCharacters()
+    local activeLookup = {}
+
+    local bestTargetHead = nil
+    local closestDistToCenter = Config.Aim.FOVRadius
+
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+    for _, enemyChar in ipairs(activeEnemies) do
+        activeLookup[enemyChar] = true
+        local node = CreateESPNode(enemyChar)
+
+        local root = enemyChar:FindFirstChild("HumanoidRootPart")
+        local head = enemyChar:FindFirstChild("Head")
+        local hum = enemyChar:FindFirstChildOfClass("Humanoid")
+
+        if root and head and hum and hum.Health > 0 then
+            local topWorld = head.Position + Vector3.new(0, 0.65, 0)
+            local bottomWorld = root.Position - Vector3.new(0, 3.0, 0)
+
+            local topScreen, topOnScreen = Camera:WorldToViewportPoint(topWorld)
+            local bottomScreen, bottomOnScreen = Camera:WorldToViewportPoint(bottomWorld)
+            local headScreen, headOnScreen = Camera:WorldToViewportPoint(head.Position)
+
+            if (topOnScreen or bottomOnScreen) and topScreen.Z > 0 then
+                local boxHeight = math.max(math.abs(bottomScreen.Y - topScreen.Y), 12)
+                local boxWidth = math.max(boxHeight * 0.62, 8)
+                local boxPosX = topScreen.X - (boxWidth * 0.5)
+                local boxPosY = topScreen.Y
+
+                -- 1. Định vị Hộp 2D
+                if Config.ESP.Box2D then
+                    node.Box.Position = UDim2.new(0, boxPosX, 0, boxPosY)
+                    node.Box.Size = UDim2.new(0, boxWidth, 0, boxHeight)
+                    node.Box.Visible = true
+                else
+                    node.Box.Visible = false
+                end
+
+                -- 2. Thanh máu + Số máu đối thủ
+                local hpRatio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                if Config.ESP.Health then
+                    node.HealthBG.Position = UDim2.new(0, boxPosX - 6, 0, boxPosY)
+                    node.HealthBG.Size = UDim2.new(0, 3, 0, boxHeight)
+                    node.HealthFill.Size = UDim2.new(1, 0, hpRatio, 0)
+                    node.HealthFill.BackgroundColor3 = Color3.fromHSV(hpRatio * 0.33, 0.9, 0.95)
+                    node.HealthBG.Visible = true
+                else
+                    node.HealthBG.Visible = false
+                end
+
+                -- 3. Hiển thị nhãn Máu & Khoảng cách
+                if Config.ESP.Health or Config.ESP.Distance then
+                    local parts = {}
+                    if Config.ESP.Health then
+                        table.insert(parts, string.format("HP: %d", math.floor(hum.Health)))
+                    end
+                    if Config.ESP.Distance then
+                        local distStuds = myRoot and (myRoot.Position - root.Position).Magnitude or topScreen.Z
+                        local distMeters = math.floor(distStuds * 0.28)
+                        table.insert(parts, string.format("[%dm]", distMeters))
+                    end
+                    node.InfoLabel.Text = table.concat(parts, " ")
+                    node.InfoLabel.Position = UDim2.new(0, topScreen.X, 0, boxPosY - 3)
+                    node.InfoLabel.Visible = true
+                else
+                    node.InfoLabel.Visible = false
+                end
+            else
+                node.Box.Visible = false
+                node.HealthBG.Visible = false
+                node.InfoLabel.Visible = false
+            end
+
+            -- 4. Tính toán mục tiêu Aim đầu gần tâm nhất trong vòng Fox
+            if Config.Aim.Enabled and IsShooting and headOnScreen and headScreen.Z > 0 then
+                local headPos2D = Vector2.new(headScreen.X, headScreen.Y)
+                local distFromCrosshair = (headPos2D - screenCenter).Magnitude
+
+                if distFromCrosshair <= closestDistToCenter then
+                    -- Chỉ khóa khi không bị chắn sau tường / vật cản
+                    if HasClearLineOfSight(head, enemyChar) then
+                        closestDistToCenter = distFromCrosshair
+                        bestTargetHead = head
+                    end
+                end
+            end
+        else
+            node.Box.Visible = false
+            node.HealthBG.Visible = false
+            node.InfoLabel.Visible = false
+        end
+    end
+
+    -- Xóa ESP của mục tiêu đã bị hạ hoặc rời trận
+    for model, _ in pairs(ESPCache) do
+        if not activeLookup[model] then
+            RemoveESPNode(model)
+        end
+    end
+
+    -- Thực thi khóa tâm vào đầu mục tiêu khi đang giữ nút bắn
+    if Config.Aim.Enabled and IsShooting and bestTargetHead then
+        local camPos = Camera.CFrame.Position
+        local targetCFrame = CFrame.new(camPos, bestTargetHead.Position)
+        Camera.CFrame = Camera.CFrame:Lerp(targetCFrame, Config.Aim.Smoothness)
     end
 end)
