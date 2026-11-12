@@ -1,10 +1,11 @@
 -- Language: Luau (Roblox Executor)
--- Module: MonicaHub_KillstreakBR_v1_1.lua
+-- Module: MonicaHub_KillstreakBR_v1_2.lua
 -- Runtime: Roblox Client / Mobile & PC Executors
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
 local CoreGui = game:GetService("CoreGui")
 local Workspace = game:GetService("Workspace")
 
@@ -27,12 +28,22 @@ local Config = {
         VisibleCheck = true,
         TargetPart = "Head",
         Smoothness = 0.85
+    },
+    Memory = {
+        Unlocked = false,
+        RequiredKey = "monica",
+        TeleBehindAndAttack = false,
+        MaxRange = 70, -- Phạm vi 70m theo yêu cầu
+        TargetPriority = "LowestHP", -- "LowestHP" (Địch yếu máu nhất) | "Closest" (Địch gần nhất)
+        BehindStuds = 3.5 -- Khoảng cách đứng sau lưng địch (studs)
     }
 }
 
+local CurrentTabMode = "ALL"
 local IsShooting = false
 local ActiveTouch = nil
-local RenderStepName = "MonicaHub_RenderLoop_v11"
+local LastAutoAttackClock = 0
+local RenderStepName = "MonicaHub_RenderLoop_v12"
 
 -- // DỌN DẸP BẢN CŨ TRƯỚC KHI KHỞI TẠO
 pcall(function()
@@ -61,7 +72,7 @@ ScreenGui.IgnoreGuiInset = true
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = SafeParent
 
--- // TẠO KÉO THẢ CHO UI (DRAGGABLE)
+-- // HÀM KÉO THẢ GIAO DIỆN (DRAGGABLE)
 local function MakeDraggable(dragHandle, targetFrame)
     local dragging = false
     local dragInput, dragStart, startPos
@@ -108,7 +119,7 @@ TogglePill.BackgroundColor3 = Color3.fromRGB(28, 30, 34)
 TogglePill.BackgroundTransparency = 0.12
 TogglePill.Text = ""
 TogglePill.AutoButtonColor = false
-TogglePill.ZIndex = 10
+TogglePill.ZIndex = 20
 TogglePill.Parent = ScreenGui
 
 local PillCorner = Instance.new("UICorner")
@@ -124,7 +135,7 @@ local PillAvatar = Instance.new("Frame")
 PillAvatar.Size = UDim2.new(0, 30, 0, 30)
 PillAvatar.Position = UDim2.new(0, 4, 0.5, -15)
 PillAvatar.BackgroundColor3 = Color3.fromRGB(45, 115, 215)
-PillAvatar.ZIndex = 11
+PillAvatar.ZIndex = 21
 PillAvatar.Parent = TogglePill
 
 local AvatarCorner = Instance.new("UICorner")
@@ -138,7 +149,7 @@ AvatarLabel.Text = "M"
 AvatarLabel.TextColor3 = Color3.fromRGB(255, 215, 90)
 AvatarLabel.Font = Enum.Font.GothamBlack
 AvatarLabel.TextSize = 16
-AvatarLabel.ZIndex = 12
+AvatarLabel.ZIndex = 22
 AvatarLabel.Parent = PillAvatar
 
 local PillFPSLabel = Instance.new("TextLabel")
@@ -150,7 +161,7 @@ PillFPSLabel.Text = '<font color="#35e060">60.0</font> <font color="#d8d8d8">fps
 PillFPSLabel.Font = Enum.Font.GothamBold
 PillFPSLabel.TextSize = 14
 PillFPSLabel.TextXAlignment = Enum.TextXAlignment.Left
-PillFPSLabel.ZIndex = 11
+PillFPSLabel.ZIndex = 21
 PillFPSLabel.Parent = TogglePill
 
 MakeDraggable(TogglePill, TogglePill)
@@ -158,8 +169,8 @@ MakeDraggable(TogglePill, TogglePill)
 -- // 2. CỬA SỔ CHÍNH MONICA HUB
 local MainWindow = Instance.new("Frame")
 MainWindow.Name = "MainWindow"
-MainWindow.Size = UDim2.new(0, 500, 0, 355)
-MainWindow.Position = UDim2.new(0.5, -250, 0.5, -177)
+MainWindow.Size = UDim2.new(0, 515, 0, 360)
+MainWindow.Position = UDim2.new(0.5, -257, 0.5, -180)
 MainWindow.BackgroundColor3 = Color3.fromRGB(26, 28, 32)
 MainWindow.BorderSizePixel = 0
 MainWindow.ZIndex = 5
@@ -237,7 +248,7 @@ CloseBtn.Parent = TopBar
 
 MakeDraggable(TopBar, MainWindow)
 
--- Cột Sidebar bên trái
+-- Cột Sidebar bên trái (Có nút Esp & Aim và nút Memory riêng như bố cục menu mẫu)
 local Sidebar = Instance.new("Frame")
 Sidebar.Size = UDim2.new(0, 125, 1, -34)
 Sidebar.Position = UDim2.new(0, 0, 0, 34)
@@ -246,43 +257,55 @@ Sidebar.BorderSizePixel = 0
 Sidebar.ZIndex = 6
 Sidebar.Parent = MainWindow
 
-local SideTab = Instance.new("Frame")
-SideTab.Size = UDim2.new(1, -12, 0, 32)
-SideTab.Position = UDim2.new(0, 6, 0, 12)
-SideTab.BackgroundColor3 = Color3.fromRGB(40, 44, 52)
-SideTab.BorderSizePixel = 0
-SideTab.ZIndex = 7
-SideTab.Parent = Sidebar
+local function CreateSidebarButton(text, posY, isActive)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -12, 0, 32)
+    btn.Position = UDim2.new(0, 6, 0, posY)
+    btn.BackgroundColor3 = isActive and Color3.fromRGB(40, 44, 52) or Color3.fromRGB(23, 25, 29)
+    btn.BorderSizePixel = 0
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.ZIndex = 7
+    btn.Parent = Sidebar
 
-local SideTabCorner = Instance.new("UICorner")
-SideTabCorner.CornerRadius = UDim.new(0, 5)
-SideTabCorner.Parent = SideTab
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = btn
 
-local SideBarAccent = Instance.new("Frame")
-SideBarAccent.Size = UDim2.new(0, 3, 0, 18)
-SideBarAccent.Position = UDim2.new(0, 3, 0.5, -9)
-SideBarAccent.BackgroundColor3 = Color3.fromRGB(55, 130, 240)
-SideBarAccent.BorderSizePixel = 0
-SideBarAccent.ZIndex = 8
-SideBarAccent.Parent = SideTab
+    local accent = Instance.new("Frame")
+    accent.Name = "Accent"
+    accent.Size = UDim2.new(0, 3, 0, 18)
+    accent.Position = UDim2.new(0, 3, 0.5, -9)
+    accent.BackgroundColor3 = Color3.fromRGB(55, 130, 240)
+    accent.BorderSizePixel = 0
+    accent.Visible = isActive
+    accent.ZIndex = 8
+    accent.Parent = btn
 
-local SideTabText = Instance.new("TextLabel")
-SideTabText.Size = UDim2.new(1, -16, 1, 0)
-SideTabText.Position = UDim2.new(0, 12, 0, 0)
-SideTabText.BackgroundTransparency = 1
-SideTabText.Text = "Esp & Aim"
-SideTabText.TextColor3 = Color3.fromRGB(235, 240, 245)
-SideTabText.Font = Enum.Font.GothamSemibold
-SideTabText.TextSize = 13
-SideTabText.TextXAlignment = Enum.TextXAlignment.Left
-SideTabText.ZIndex = 8
-SideTabText.Parent = SideTab
+    local lbl = Instance.new("TextLabel")
+    lbl.Name = "Label"
+    lbl.Size = UDim2.new(1, -16, 1, 0)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = isActive and Color3.fromRGB(235, 240, 245) or Color3.fromRGB(150, 155, 165)
+    lbl.Font = Enum.Font.GothamSemibold
+    lbl.TextSize = 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 8
+    lbl.Parent = btn
+
+    return btn, accent, lbl
+end
+
+local SideEspAimBtn, SideEspAimAccent, SideEspAimLabel = CreateSidebarButton("Esp & Aim", 12, true)
+local SideMemoryBtn, SideMemoryAccent, SideMemoryLabel = CreateSidebarButton("Memory 🔒", 50, false)
 
 local SideInfo = Instance.new("TextLabel")
 SideInfo.Size = UDim2.new(1, -16, 0, 50)
 SideInfo.Position = UDim2.new(0, 10, 1, -56)
 SideInfo.BackgroundTransparency = 1
-SideInfo.Text = "Monica Hub v1.1\nKillstreak BR"
+SideInfo.Text = "Monica Hub v1.2\nKillstreak BR"
 SideInfo.TextColor3 = Color3.fromRGB(115, 120, 130)
 SideInfo.Font = Enum.Font.Gotham
 SideInfo.TextSize = 11
@@ -298,7 +321,7 @@ ContentArea.BackgroundTransparency = 1
 ContentArea.ZIndex = 6
 ContentArea.Parent = MainWindow
 
--- Thanh Sub-Tab
+-- Thanh Sub-Tab phía trên
 local SubTabBar = Instance.new("Frame")
 SubTabBar.Size = UDim2.new(1, -24, 0, 30)
 SubTabBar.Position = UDim2.new(0, 12, 0, 10)
@@ -310,7 +333,7 @@ local function CreateSubTabButton(text, posX, width)
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(0, width, 0, 28)
     btn.Position = UDim2.new(0, posX, 0, 0)
-    btn.BackgroundColor3 = Color3.fromRGB(48, 112, 205)
+    btn.BackgroundColor3 = Color3.fromRGB(38, 42, 49)
     btn.Text = text
     btn.TextColor3 = Color3.fromRGB(245, 248, 255)
     btn.Font = Enum.Font.GothamSemibold
@@ -325,10 +348,12 @@ local function CreateSubTabButton(text, posX, width)
     return btn
 end
 
-local TabAllBtn = CreateSubTabButton("All Features", 0, 92)
-local TabEspBtn = CreateSubTabButton("Draw Esp", 98, 82)
-local TabAimBtn = CreateSubTabButton("Aimbot", 186, 72)
+local TabAllBtn = CreateSubTabButton("All Features", 0, 88)
+local TabEspBtn = CreateSubTabButton("Draw Esp", 94, 78)
+local TabAimBtn = CreateSubTabButton("Aimbot", 178, 70)
+local TabMemBtn = CreateSubTabButton("Memory 🔒", 254, 92)
 
+-- // KHUNG CHỨA 1: ESP & AIMBOT
 local SwitchContainer = Instance.new("Frame")
 SwitchContainer.Size = UDim2.new(1, -24, 1, -48)
 SwitchContainer.Position = UDim2.new(0, 12, 0, 44)
@@ -348,14 +373,14 @@ SectionLabel.TextXAlignment = Enum.TextXAlignment.Left
 SectionLabel.ZIndex = 8
 SectionLabel.Parent = SwitchContainer
 
-local function CreateCheckbox(labelText, posX, posY, defaultState, callback)
+local function CreateCheckbox(parentFrame, labelText, posX, posY, width, defaultState, callback)
     local holder = Instance.new("TextButton")
-    holder.Size = UDim2.new(0, 170, 0, 28)
+    holder.Size = UDim2.new(0, width or 170, 0, 28)
     holder.Position = UDim2.new(0, posX, 0, posY)
     holder.BackgroundTransparency = 1
     holder.Text = ""
     holder.ZIndex = 8
-    holder.Parent = SwitchContainer
+    holder.Parent = parentFrame
 
     local box = Instance.new("Frame")
     box.Size = UDim2.new(0, 20, 0, 20)
@@ -403,33 +428,33 @@ local function CreateCheckbox(labelText, posX, posY, defaultState, callback)
 end
 
 -- Cột trái: Các công tắc ESP
-local EspBoxToggle = CreateCheckbox("Định vị hộp 2D", 0, 24, false, function(val)
+local EspBoxToggle = CreateCheckbox(SwitchContainer, "Định vị hộp 2D", 0, 24, 170, false, function(val)
     Config.ESP.Box2D = val
 end)
 
-local EspHealthToggle = CreateCheckbox("Lượng máu đối thủ", 0, 56, false, function(val)
+local EspHealthToggle = CreateCheckbox(SwitchContainer, "Lượng máu đối thủ", 0, 56, 170, false, function(val)
     Config.ESP.Health = val
 end)
 
-local EspDistToggle = CreateCheckbox("Khoảng cách địch", 0, 88, false, function(val)
+local EspDistToggle = CreateCheckbox(SwitchContainer, "Khoảng cách địch", 0, 88, 170, false, function(val)
     Config.ESP.Distance = val
 end)
 
-local EspFovToggle = CreateCheckbox("ESP vòng Aim (Hiện/Ẩn)", 0, 120, false, function(val)
+local EspFovToggle = CreateCheckbox(SwitchContainer, "ESP vòng Aim (Hiện/Ẩn)", 0, 120, 170, false, function(val)
     Config.ESP.ShowFOV = val
 end)
 
 -- Cột phải: Các công tắc Aimbot
-local AimHeadToggle = CreateCheckbox("Aim đầu địch (Gần tâm)", 180, 24, false, function(val)
+local AimHeadToggle = CreateCheckbox(SwitchContainer, "Aim đầu địch (Gần tâm)", 180, 24, 175, false, function(val)
     Config.Aim.Enabled = val
 end)
 
-local AimVisToggle = CreateCheckbox("Check vật cản (Sau tường)", 180, 56, true, function(val)
+local AimVisToggle = CreateCheckbox(SwitchContainer, "Check vật cản (Sau tường)", 180, 56, 175, true, function(val)
     Config.Aim.VisibleCheck = val
 end)
 
 local ShootStateLabel = Instance.new("TextLabel")
-ShootStateLabel.Size = UDim2.new(0, 170, 0, 24)
+ShootStateLabel.Size = UDim2.new(0, 175, 0, 24)
 ShootStateLabel.Position = UDim2.new(0, 180, 0, 90)
 ShootStateLabel.BackgroundTransparency = 1
 ShootStateLabel.RichText = true
@@ -448,14 +473,14 @@ SettingsDivider.BorderSizePixel = 0
 SettingsDivider.ZIndex = 8
 SettingsDivider.Parent = SwitchContainer
 
--- Hàm tạo Slider dùng chung cho cả Khoảng cách ESP (1-500m) và Vòng Fox (FOV)
-local function CreateSlider(titlePrefix, suffix, posY, minVal, maxVal, defaultVal, callback)
+-- Hàm tạo Slider
+local function CreateSlider(parentFrame, titlePrefix, suffix, posY, minVal, maxVal, defaultVal, callback)
     local group = Instance.new("Frame")
     group.Size = UDim2.new(1, 0, 0, 44)
     group.Position = UDim2.new(0, 0, 0, posY)
     group.BackgroundTransparency = 1
     group.ZIndex = 8
-    group.Parent = SwitchContainer
+    group.Parent = parentFrame
 
     local title = Instance.new("TextLabel")
     title.Size = UDim2.new(1, 0, 0, 18)
@@ -538,8 +563,8 @@ local function CreateSlider(titlePrefix, suffix, posY, minVal, maxVal, defaultVa
     return group
 end
 
--- Thanh trượt 1: Khoảng cách ESP hoạt động (1m - 500m)
 local EspDistSliderGroup = CreateSlider(
+    SwitchContainer,
     "Khoảng cách ESP tối đa (1-500m)",
     "m",
     162,
@@ -551,8 +576,8 @@ local EspDistSliderGroup = CreateSlider(
     end
 )
 
--- Thanh trượt 2: Chỉnh vòng Fox (FOV Aim)
 local AimFovSliderGroup = CreateSlider(
+    SwitchContainer,
     "Chỉnh vòng Fox (FOV)",
     "",
     212,
@@ -564,29 +589,421 @@ local AimFovSliderGroup = CreateSlider(
     end
 )
 
+-- // KHUNG CHỨA 2: PHẦN MEMORY (CHỈ MỞ KHI NHẬP ĐÚNG KEY "monica")
+local MemoryContainer = Instance.new("Frame")
+MemoryContainer.Name = "MemoryContainer"
+MemoryContainer.Size = UDim2.new(1, -24, 1, -48)
+MemoryContainer.Position = UDim2.new(0, 12, 0, 44)
+MemoryContainer.BackgroundTransparency = 1
+MemoryContainer.Visible = false
+MemoryContainer.ZIndex = 7
+MemoryContainer.Parent = ContentArea
+
+local MemSwitchHeader = Instance.new("TextLabel")
+MemSwitchHeader.Size = UDim2.new(1, 0, 0, 18)
+MemSwitchHeader.Position = UDim2.new(0, 0, 0, 0)
+MemSwitchHeader.BackgroundTransparency = 1
+MemSwitchHeader.Text = "Switch — Memory (Phạm vi 70m)"
+MemSwitchHeader.TextColor3 = Color3.fromRGB(155, 160, 170)
+MemSwitchHeader.Font = Enum.Font.GothamSemibold
+MemSwitchHeader.TextSize = 12
+MemSwitchHeader.TextXAlignment = Enum.TextXAlignment.Left
+MemSwitchHeader.ZIndex = 8
+MemSwitchHeader.Parent = MemoryContainer
+
+local TeleAttackToggle = CreateCheckbox(
+    MemoryContainer,
+    "Tele nhanh ra sau địch (≤70m) & Tự bắn/đánh",
+    0,
+    26,
+    340,
+    false,
+    function(val)
+        Config.Memory.TeleBehindAndAttack = val
+        if not val then
+            IsShooting = false
+        end
+    end
+)
+
+local MemTargetStatus = Instance.new("TextLabel")
+MemTargetStatus.Size = UDim2.new(1, 0, 0, 20)
+MemTargetStatus.Position = UDim2.new(0, 0, 0, 60)
+MemTargetStatus.BackgroundTransparency = 1
+MemTargetStatus.RichText = true
+MemTargetStatus.Text = 'Mục tiêu hiện tại: <font color="#9096a4">Đang chờ kích hoạt...</font>'
+MemTargetStatus.Font = Enum.Font.GothamSemibold
+MemTargetStatus.TextSize = 11
+MemTargetStatus.TextXAlignment = Enum.TextXAlignment.Left
+MemTargetStatus.ZIndex = 8
+MemTargetStatus.Parent = MemoryContainer
+
+local MemDivider = Instance.new("Frame")
+MemDivider.Size = UDim2.new(1, 0, 0, 1)
+MemDivider.Position = UDim2.new(0, 0, 0, 88)
+MemDivider.BackgroundColor3 = Color3.fromRGB(45, 48, 55)
+MemDivider.BorderSizePixel = 0
+MemDivider.ZIndex = 8
+MemDivider.Parent = MemoryContainer
+
+local MemSettingsHeader = Instance.new("TextLabel")
+MemSettingsHeader.Size = UDim2.new(1, 0, 0, 18)
+MemSettingsHeader.Position = UDim2.new(0, 0, 0, 96)
+MemSettingsHeader.BackgroundTransparency = 1
+MemSettingsHeader.Text = "Settings — Cách lựa chọn mục tiêu"
+MemSettingsHeader.TextColor3 = Color3.fromRGB(155, 160, 170)
+MemSettingsHeader.Font = Enum.Font.GothamSemibold
+MemSettingsHeader.TextSize = 12
+MemSettingsHeader.TextXAlignment = Enum.TextXAlignment.Left
+MemSettingsHeader.ZIndex = 8
+MemSettingsHeader.Parent = MemoryContainer
+
+-- Hộp Dropdown chọn mục tiêu (Thiết kế giống hệt thanh "Aim body / Bullet head" có nút mũi tên xanh trong video)
+local DropdownBar = Instance.new("TextButton")
+DropdownBar.Name = "TargetPriorityDropdown"
+DropdownBar.Size = UDim2.new(0, 260, 0, 28)
+DropdownBar.Position = UDim2.new(0, 0, 0, 122)
+DropdownBar.BackgroundColor3 = Color3.fromRGB(43, 46, 53)
+DropdownBar.BorderSizePixel = 0
+DropdownBar.Text = ""
+DropdownBar.AutoButtonColor = false
+DropdownBar.ZIndex = 12
+DropdownBar.Parent = MemoryContainer
+
+local DropdownBarCorner = Instance.new("UICorner")
+DropdownBarCorner.CornerRadius = UDim.new(0, 4)
+DropdownBarCorner.Parent = DropdownBar
+
+local DropdownBarStroke = Instance.new("UIStroke")
+DropdownBarStroke.Color = Color3.fromRGB(62, 67, 76)
+DropdownBarStroke.Thickness = 1
+DropdownBarStroke.Parent = DropdownBar
+
+local DropdownSelectedText = Instance.new("TextLabel")
+DropdownSelectedText.Size = UDim2.new(1, -38, 1, 0)
+DropdownSelectedText.Position = UDim2.new(0, 10, 0, 0)
+DropdownSelectedText.BackgroundTransparency = 1
+DropdownSelectedText.Text = "Địch yếu máu nhất"
+DropdownSelectedText.TextColor3 = Color3.fromRGB(235, 240, 248)
+DropdownSelectedText.Font = Enum.Font.GothamSemibold
+DropdownSelectedText.TextSize = 12
+DropdownSelectedText.TextXAlignment = Enum.TextXAlignment.Left
+DropdownSelectedText.ZIndex = 13
+DropdownSelectedText.Parent = DropdownBar
+
+-- Nút vuông màu xanh chứa mũi tên trắng ở góc phải thanh Dropdown như trong video
+local DropdownArrowBox = Instance.new("Frame")
+DropdownArrowBox.Size = UDim2.new(0, 26, 0, 24)
+DropdownArrowBox.Position = UDim2.new(1, -28, 0.5, -12)
+DropdownArrowBox.BackgroundColor3 = Color3.fromRGB(48, 112, 205)
+DropdownArrowBox.BorderSizePixel = 0
+DropdownArrowBox.ZIndex = 13
+DropdownArrowBox.Parent = DropdownBar
+
+local ArrowBoxCorner = Instance.new("UICorner")
+ArrowBoxCorner.CornerRadius = UDim.new(0, 4)
+ArrowBoxCorner.Parent = DropdownArrowBox
+
+local ArrowIcon = Instance.new("TextLabel")
+ArrowIcon.Size = UDim2.new(1, 0, 1, 0)
+ArrowIcon.BackgroundTransparency = 1
+ArrowIcon.Text = "▼"
+ArrowIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+ArrowIcon.Font = Enum.Font.GothamBold
+ArrowIcon.TextSize = 11
+ArrowIcon.ZIndex = 14
+ArrowIcon.Parent = DropdownArrowBox
+
+local HelpMark = Instance.new("TextLabel")
+HelpMark.Size = UDim2.new(0, 28, 0, 28)
+HelpMark.Position = UDim2.new(0, 268, 0, 122)
+HelpMark.BackgroundTransparency = 1
+HelpMark.Text = "(?)"
+HelpMark.TextColor3 = Color3.fromRGB(145, 150, 160)
+HelpMark.Font = Enum.Font.GothamSemibold
+HelpMark.TextSize = 12
+HelpMark.ZIndex = 12
+HelpMark.Parent = MemoryContainer
+
+-- Danh sách xổ xuống khi bấm vào thanh Dropdown
+local DropdownListFrame = Instance.new("Frame")
+DropdownListFrame.Name = "DropdownListFrame"
+DropdownListFrame.Size = UDim2.new(0, 260, 0, 58)
+DropdownListFrame.Position = UDim2.new(0, 0, 0, 152)
+DropdownListFrame.BackgroundColor3 = Color3.fromRGB(34, 37, 43)
+DropdownListFrame.BorderSizePixel = 0
+DropdownListFrame.Visible = false
+DropdownListFrame.ZIndex = 15
+DropdownListFrame.Parent = MemoryContainer
+
+local DropdownListCorner = Instance.new("UICorner")
+DropdownListCorner.CornerRadius = UDim.new(0, 4)
+DropdownListCorner.Parent = DropdownListFrame
+
+local DropdownListStroke = Instance.new("UIStroke")
+DropdownListStroke.Color = Color3.fromRGB(68, 74, 85)
+DropdownListStroke.Thickness = 1
+DropdownListStroke.Parent = DropdownListFrame
+
+local DropdownOptions = {
+    {Id = "LowestHP", Label = "Địch yếu máu nhất"},
+    {Id = "Closest",  Label = "Địch gần nhất"}
+}
+
+local OptionButtons = {}
+
+local function RefreshDropdownHighlight()
+    for _, item in ipairs(OptionButtons) do
+        local isSelected = (Config.Memory.TargetPriority == item.Id)
+        item.Button.BackgroundColor3 = isSelected and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(34, 37, 43)
+        item.Button.TextColor3 = isSelected and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(205, 210, 220)
+        if isSelected then
+            DropdownSelectedText.Text = item.Label
+        end
+    end
+end
+
+for idx, opt in ipairs(DropdownOptions) do
+    local optBtn = Instance.new("TextButton")
+    optBtn.Size = UDim2.new(1, -6, 0, 25)
+    optBtn.Position = UDim2.new(0, 3, 0, 3 + (idx - 1) * 26)
+    optBtn.BackgroundColor3 = Color3.fromRGB(34, 37, 43)
+    optBtn.BorderSizePixel = 0
+    optBtn.Text = "  " .. opt.Label
+    optBtn.TextColor3 = Color3.fromRGB(220, 225, 235)
+    optBtn.Font = Enum.Font.GothamSemibold
+    optBtn.TextSize = 12
+    optBtn.TextXAlignment = Enum.TextXAlignment.Left
+    optBtn.AutoButtonColor = false
+    optBtn.ZIndex = 16
+    optBtn.Parent = DropdownListFrame
+
+    local optCorner = Instance.new("UICorner")
+    optCorner.CornerRadius = UDim.new(0, 3)
+    optCorner.Parent = optBtn
+
+    table.insert(OptionButtons, {Id = opt.Id, Label = opt.Label, Button = optBtn})
+
+    optBtn.MouseButton1Click:Connect(function()
+        Config.Memory.TargetPriority = opt.Id
+        RefreshDropdownHighlight()
+        DropdownListFrame.Visible = false
+        ArrowIcon.Text = "▼"
+    end)
+end
+
+RefreshDropdownHighlight()
+
+DropdownBar.MouseButton1Click:Connect(function()
+    DropdownListFrame.Visible = not DropdownListFrame.Visible
+    ArrowIcon.Text = DropdownListFrame.Visible and "▲" or "▼"
+end)
+
+-- // 3. BẢNG HỎI KEY KHI NHẤN VÀO PHẦN MEMORY (KEY = "monica")
+local KeyModalOverlay = Instance.new("Frame")
+KeyModalOverlay.Name = "KeyModalOverlay"
+KeyModalOverlay.Size = UDim2.new(1, 0, 1, -34)
+KeyModalOverlay.Position = UDim2.new(0, 0, 0, 34)
+KeyModalOverlay.BackgroundColor3 = Color3.fromRGB(12, 14, 18)
+KeyModalOverlay.BackgroundTransparency = 0.25
+KeyModalOverlay.BorderSizePixel = 0
+KeyModalOverlay.Visible = false
+KeyModalOverlay.ZIndex = 30
+KeyModalOverlay.Parent = MainWindow
+
+local KeyDialog = Instance.new("Frame")
+KeyDialog.Size = UDim2.new(0, 310, 0, 175)
+KeyDialog.Position = UDim2.new(0.5, -155, 0.5, -87)
+KeyDialog.BackgroundColor3 = Color3.fromRGB(28, 31, 37)
+KeyDialog.BorderSizePixel = 0
+KeyDialog.ZIndex = 31
+KeyDialog.Parent = KeyModalOverlay
+
+local KeyDialogCorner = Instance.new("UICorner")
+KeyDialogCorner.CornerRadius = UDim.new(0, 8)
+KeyDialogCorner.Parent = KeyDialog
+
+local KeyDialogStroke = Instance.new("UIStroke")
+KeyDialogStroke.Color = Color3.fromRGB(55, 130, 240)
+KeyDialogStroke.Thickness = 1.4
+KeyDialogStroke.Parent = KeyDialog
+
+local KeyTitle = Instance.new("TextLabel")
+KeyTitle.Size = UDim2.new(1, -24, 0, 26)
+KeyTitle.Position = UDim2.new(0, 12, 0, 12)
+KeyTitle.BackgroundTransparency = 1
+KeyTitle.Text = "🔒 Mở khóa phần Memory"
+KeyTitle.TextColor3 = Color3.fromRGB(240, 245, 255)
+KeyTitle.Font = Enum.Font.GothamBold
+KeyTitle.TextSize = 14
+KeyTitle.TextXAlignment = Enum.TextXAlignment.Left
+KeyTitle.ZIndex = 32
+KeyTitle.Parent = KeyDialog
+
+local KeySubTitle = Instance.new("TextLabel")
+KeySubTitle.Size = UDim2.new(1, -24, 0, 18)
+KeySubTitle.Position = UDim2.new(0, 12, 0, 38)
+KeySubTitle.BackgroundTransparency = 1
+KeySubTitle.Text = "Nhập Key truy cập để mở chức năng Memory:"
+KeySubTitle.TextColor3 = Color3.fromRGB(165, 172, 185)
+KeySubTitle.Font = Enum.Font.Gotham
+KeySubTitle.TextSize = 11
+KeySubTitle.TextXAlignment = Enum.TextXAlignment.Left
+KeySubTitle.ZIndex = 32
+KeySubTitle.Parent = KeyDialog
+
+local KeyInputBox = Instance.new("TextBox")
+KeyInputBox.Size = UDim2.new(1, -24, 0, 34)
+KeyInputBox.Position = UDim2.new(0, 12, 0, 64)
+KeyInputBox.BackgroundColor3 = Color3.fromRGB(38, 42, 50)
+KeyInputBox.BorderSizePixel = 0
+KeyInputBox.Text = ""
+KeyInputBox.PlaceholderText = "Nhập key tại đây..."
+KeyInputBox.PlaceholderColor3 = Color3.fromRGB(120, 126, 138)
+KeyInputBox.TextColor3 = Color3.fromRGB(245, 248, 255)
+KeyInputBox.Font = Enum.Font.GothamSemibold
+KeyInputBox.TextSize = 13
+KeyInputBox.ClearTextOnFocus = false
+KeyInputBox.ZIndex = 32
+KeyInputBox.Parent = KeyDialog
+
+local KeyBoxCorner = Instance.new("UICorner")
+KeyBoxCorner.CornerRadius = UDim.new(0, 5)
+KeyBoxCorner.Parent = KeyInputBox
+
+local KeyBoxStroke = Instance.new("UIStroke")
+KeyBoxStroke.Color = Color3.fromRGB(65, 72, 84)
+KeyBoxStroke.Thickness = 1
+KeyBoxStroke.Parent = KeyInputBox
+
+local KeyStatusMsg = Instance.new("TextLabel")
+KeyStatusMsg.Size = UDim2.new(1, -24, 0, 18)
+KeyStatusMsg.Position = UDim2.new(0, 12, 0, 102)
+KeyStatusMsg.BackgroundTransparency = 1
+KeyStatusMsg.Text = ""
+KeyStatusMsg.TextColor3 = Color3.fromRGB(255, 95, 95)
+KeyStatusMsg.Font = Enum.Font.GothamSemibold
+KeyStatusMsg.TextSize = 11
+KeyStatusMsg.TextXAlignment = Enum.TextXAlignment.Left
+KeyStatusMsg.ZIndex = 32
+KeyStatusMsg.Parent = KeyDialog
+
+local KeyVerifyBtn = Instance.new("TextButton")
+KeyVerifyBtn.Size = UDim2.new(0, 138, 0, 32)
+KeyVerifyBtn.Position = UDim2.new(0, 12, 1, -44)
+KeyVerifyBtn.BackgroundColor3 = Color3.fromRGB(48, 112, 205)
+KeyVerifyBtn.Text = "Xác nhận Key"
+KeyVerifyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+KeyVerifyBtn.Font = Enum.Font.GothamBold
+KeyVerifyBtn.TextSize = 12
+KeyVerifyBtn.AutoButtonColor = false
+KeyVerifyBtn.ZIndex = 32
+KeyVerifyBtn.Parent = KeyDialog
+
+local VerifyBtnCorner = Instance.new("UICorner")
+VerifyBtnCorner.CornerRadius = UDim.new(0, 5)
+VerifyBtnCorner.Parent = KeyVerifyBtn
+
+local KeyCloseBtn = Instance.new("TextButton")
+KeyCloseBtn.Size = UDim2.new(0, 138, 0, 32)
+KeyCloseBtn.Position = UDim2.new(1, -150, 1, -44)
+KeyCloseBtn.BackgroundColor3 = Color3.fromRGB(52, 56, 66)
+KeyCloseBtn.Text = "Đóng"
+KeyCloseBtn.TextColor3 = Color3.fromRGB(225, 230, 240)
+KeyCloseBtn.Font = Enum.Font.GothamSemibold
+KeyCloseBtn.TextSize = 12
+KeyCloseBtn.AutoButtonColor = false
+KeyCloseBtn.ZIndex = 32
+KeyCloseBtn.Parent = KeyDialog
+
+local CloseKeyCorner = Instance.new("UICorner")
+CloseKeyCorner.CornerRadius = UDim.new(0, 5)
+CloseKeyCorner.Parent = KeyCloseBtn
+
+-- // QUẢN LÝ CHUYỂN ĐỔI TAB & KIỂM TRA KEY MEMORY
+local function UpdateSidebarHighlight(isMemoryTab)
+    SideEspAimBtn.BackgroundColor3 = (not isMemoryTab) and Color3.fromRGB(40, 44, 52) or Color3.fromRGB(23, 25, 29)
+    SideEspAimAccent.Visible = not isMemoryTab
+    SideEspAimLabel.TextColor3 = (not isMemoryTab) and Color3.fromRGB(235, 240, 245) or Color3.fromRGB(150, 155, 165)
+
+    SideMemoryBtn.BackgroundColor3 = isMemoryTab and Color3.fromRGB(40, 44, 52) or Color3.fromRGB(23, 25, 29)
+    SideMemoryAccent.Visible = isMemoryTab
+    SideMemoryLabel.TextColor3 = isMemoryTab and Color3.fromRGB(235, 240, 245) or Color3.fromRGB(150, 155, 165)
+end
+
 local function SetTabFilter(mode)
+    if mode == "MEMORY" and not Config.Memory.Unlocked then
+        -- Chưa mở khóa -> hiện bảng hỏi Key, giữ nguyên tab cũ bên dưới
+        KeyStatusMsg.Text = ""
+        KeyInputBox.Text = ""
+        KeyModalOverlay.Visible = true
+        return
+    end
+
+    CurrentTabMode = mode
     TabAllBtn.BackgroundColor3 = (mode == "ALL") and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(38, 42, 49)
     TabEspBtn.BackgroundColor3 = (mode == "ESP") and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(38, 42, 49)
     TabAimBtn.BackgroundColor3 = (mode == "AIM") and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(38, 42, 49)
+    TabMemBtn.BackgroundColor3 = (mode == "MEMORY") and Color3.fromRGB(48, 112, 205) or Color3.fromRGB(38, 42, 49)
 
-    local showEsp = (mode == "ALL" or mode == "ESP")
-    local showAim = (mode == "ALL" or mode == "AIM")
+    if mode == "MEMORY" then
+        SwitchContainer.Visible = false
+        MemoryContainer.Visible = true
+        UpdateSidebarHighlight(true)
+    else
+        MemoryContainer.Visible = false
+        DropdownListFrame.Visible = false
+        ArrowIcon.Text = "▼"
+        SwitchContainer.Visible = true
+        UpdateSidebarHighlight(false)
 
-    EspBoxToggle.Visible = showEsp
-    EspHealthToggle.Visible = showEsp
-    EspDistToggle.Visible = showEsp
-    EspFovToggle.Visible = showEsp
-    EspDistSliderGroup.Visible = showEsp
+        local showEsp = (mode == "ALL" or mode == "ESP")
+        local showAim = (mode == "ALL" or mode == "AIM")
 
-    AimHeadToggle.Visible = showAim
-    AimVisToggle.Visible = showAim
-    ShootStateLabel.Visible = showAim
-    AimFovSliderGroup.Visible = showAim
+        EspBoxToggle.Visible = showEsp
+        EspHealthToggle.Visible = showEsp
+        EspDistToggle.Visible = showEsp
+        EspFovToggle.Visible = showEsp
+        EspDistSliderGroup.Visible = showEsp
+
+        AimHeadToggle.Visible = showAim
+        AimVisToggle.Visible = showAim
+        ShootStateLabel.Visible = showAim
+        AimFovSliderGroup.Visible = showAim
+    end
 end
+
+-- Xử lý nút Xác nhận Key & nút Đóng trên bảng Key
+KeyVerifyBtn.MouseButton1Click:Connect(function()
+    local entered = string.lower((KeyInputBox.Text or ""):gsub("^%s*(.-)%s*$", "%1"))
+    if entered == Config.Memory.RequiredKey then
+        Config.Memory.Unlocked = true
+        TabMemBtn.Text = "Memory 🔓"
+        SideMemoryLabel.Text = "Memory 🔓"
+        KeyModalOverlay.Visible = false
+        SetTabFilter("MEMORY")
+    else
+        KeyStatusMsg.Text = "Sai Key! Vui lòng nhập đúng key hoặc bấm Đóng."
+    end
+end)
+
+KeyCloseBtn.MouseButton1Click:Connect(function()
+    -- Đóng bảng hỏi Key và tiếp tục sử dụng 2 chức năng ESP & Aimbot bình thường
+    KeyModalOverlay.Visible = false
+    KeyStatusMsg.Text = ""
+    if CurrentTabMode == "MEMORY" then
+        SetTabFilter("ALL")
+    end
+end)
 
 TabAllBtn.MouseButton1Click:Connect(function() SetTabFilter("ALL") end)
 TabEspBtn.MouseButton1Click:Connect(function() SetTabFilter("ESP") end)
 TabAimBtn.MouseButton1Click:Connect(function() SetTabFilter("AIM") end)
+TabMemBtn.MouseButton1Click:Connect(function() SetTabFilter("MEMORY") end)
+
+SideEspAimBtn.MouseButton1Click:Connect(function() SetTabFilter("ALL") end)
+SideMemoryBtn.MouseButton1Click:Connect(function() SetTabFilter("MEMORY") end)
+
 SetTabFilter("ALL")
 
 local function ToggleMenuVisibility()
@@ -597,7 +1014,7 @@ end
 TogglePill.MouseButton1Click:Connect(ToggleMenuVisibility)
 CloseBtn.MouseButton1Click:Connect(ToggleMenuVisibility)
 
--- // 3. VÒNG FOV TRÊN MÀN HÌNH (ESP VÒNG AIM)
+-- // 4. VÒNG FOV TRÊN MÀN HÌNH (ESP VÒNG AIM)
 local FOVCircleFrame = Instance.new("Frame")
 FOVCircleFrame.Name = "FOVCircle"
 FOVCircleFrame.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -618,7 +1035,7 @@ FOVStroke.Thickness = 1.5
 FOVStroke.Transparency = 0.15
 FOVStroke.Parent = FOVCircleFrame
 
--- // 4. NHẬN DIỆN ẤN GIỮ NÚT TẤN CÔNG / NÚT BẮN
+-- // 5. NHẬN DIỆN ẤN GIỮ NÚT TẤN CÔNG / NÚT BẮN
 local function IsPointOverShootControl(screenPos)
     local pGui = LocalPlayer:FindFirstChild("PlayerGui")
     if pGui then
@@ -642,7 +1059,6 @@ local function IsPointOverShootControl(screenPos)
         end
     end
 
-    -- Vùng cụm nút bắn / chém bên phải màn hình của Killstreak Battle Royale
     local vp = Camera.ViewportSize
     local normX = screenPos.X / vp.X
     local normY = screenPos.Y / vp.Y
@@ -696,7 +1112,7 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
--- // 5. HỆ THỐNG ĐỊNH VỊ ESP 2D
+-- // 6. HỆ THỐNG ĐỊNH VỊ ESP 2D
 local ESPContainer = Instance.new("Folder")
 ESPContainer.Name = "ESPContainer"
 ESPContainer.Parent = ScreenGui
@@ -775,7 +1191,6 @@ local function RemoveESPNode(model)
     end
 end
 
--- Lọc chuẩn xác nhân vật bản thân / Viewmodel vũ khí khi tấn công
 local function IsValidEnemyModel(model, myChar, myRoot)
     if not model or not model:IsA("Model") then return false end
     if model == myChar then return false end
@@ -791,8 +1206,7 @@ local function IsValidEnemyModel(model, myChar, myRoot)
         return false
     end
 
-    -- Loại bỏ bản sao hiệu ứng / hitbox gắn trùng vị trí người chơi khi vung vũ khí hoặc bắn
-    if myRoot and (root.Position - myRoot.Position).Magnitude < 2.2 then
+    if myRoot and (root.Position - myRoot.Position).Magnitude < 1.8 and not Config.Memory.TeleBehindAndAttack then
         return false
     end
 
@@ -837,7 +1251,7 @@ local function GetEnemyCharacters()
     return enemies
 end
 
--- // 6. KIỂM TRA VẬT CẢN (RAYCAST VISIBILITY CHECK)
+-- // 7. KIỂM TRA VẬT CẢN (RAYCAST VISIBILITY CHECK)
 local function HasClearLineOfSight(targetPart, targetCharacter)
     if not Config.Aim.VisibleCheck then
         return true
@@ -870,7 +1284,36 @@ local function HasClearLineOfSight(targetPart, targetCharacter)
     return false
 end
 
--- // 7. VÒNG LẶP ĐỒNG BỘ CAMERA -> AIMBOT -> ESP (KHẮC PHỤC LỆCH ESP KHI BẮN/TẤN CÔNG)
+-- // 8. HÀM TỰ BẮN / ĐÁNH ĐỊCH KHI ĐANG TELE SAU LƯNG
+local function TriggerAutoAttack()
+    local now = os.clock()
+    if now - LastAutoAttackClock < 0.08 then
+        return
+    end
+    LastAutoAttackClock = now
+
+    local myChar = LocalPlayer.Character
+    if myChar then
+        local tool = myChar:FindFirstChildOfClass("Tool")
+        if tool then
+            pcall(function()
+                tool:Activate()
+            end)
+        end
+    end
+
+    -- Kích hoạt click / chạm tấn công trên cả Executor Mobile và PC
+    pcall(function()
+        if mouse1click then
+            mouse1click()
+        else
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton1(Vector2.new(Camera.ViewportSize.X * 0.5, Camera.ViewportSize.Y * 0.5))
+        end
+    end)
+end
+
+-- // 9. VÒNG LẶP ĐỒNG BỘ: MEMORY TELE 70M -> AIMBOT -> ESP
 local frameCount = 0
 local lastFPSTime = os.clock()
 
@@ -900,9 +1343,83 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
     local activeEnemies = GetEnemyCharacters()
     local myChar = LocalPlayer.Character
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
 
-    -- BƯỚC 1: TÍNH TOÁN & XOAY CAMERA AIMBOT TRƯỚC KHI VẼ ESP
-    -- Nhờ cập nhật Camera.CFrame trước, tọa độ WorldToViewportPoint của ESP ngay bên dưới sẽ khớp 100% với góc nhìn mới khi ấn nút tấn công
+    -- BƯỚC 1: CHỨC NĂNG MEMORY — TELE NHANH RA SAU ĐỊCH (≤ 70M) & TỰ BẮN/ĐÁNH
+    if Config.Memory.Unlocked and Config.Memory.TeleBehindAndAttack and myRoot and myHum and myHum.Health > 0 then
+        local chosenEnemy = nil
+        local bestScore = math.huge
+        local chosenDistMeters = 0
+
+        for _, enemyChar in ipairs(activeEnemies) do
+            local eRoot = enemyChar:FindFirstChild("HumanoidRootPart")
+            local eHum = enemyChar:FindFirstChildOfClass("Humanoid")
+            local eHead = enemyChar:FindFirstChild("Head")
+
+            if eRoot and eHum and eHead and eHum.Health > 0 then
+                local distStuds = (myRoot.Position - eRoot.Position).Magnitude
+                local distMeters = distStuds * 0.28
+
+                -- Chỉ quét mục tiêu trong bán kính 70m
+                if distMeters <= Config.Memory.MaxRange then
+                    if Config.Memory.TargetPriority == "LowestHP" then
+                        -- Ưu tiên địch yếu máu nhất (nếu bằng máu thì lấy đứa gần hơn)
+                        local score = (eHum.Health * 1000) + distMeters
+                        if score < bestScore then
+                            bestScore = score
+                            chosenEnemy = enemyChar
+                            chosenDistMeters = math.max(1, math.floor(distMeters + 0.5))
+                        end
+                    else
+                        -- Ưu tiên địch gần nhất
+                        if distMeters < bestScore then
+                            bestScore = distMeters
+                            chosenEnemy = enemyChar
+                            chosenDistMeters = math.max(1, math.floor(distMeters + 0.5))
+                        end
+                    end
+                end
+            end
+        end
+
+        if chosenEnemy then
+            local eRoot = chosenEnemy:FindFirstChild("HumanoidRootPart")
+            local eHead = chosenEnemy:FindFirstChild("Head")
+            local eHum = chosenEnemy:FindFirstChildOfClass("Humanoid")
+
+            if eRoot and eHead and eHum then
+                -- Tính vị trí ngay phía sau lưng địch (ngược hướng LookVector của địch) và quay mặt về phía địch
+                local lookVec = eRoot.CFrame.LookVector
+                local flatLook = Vector3.new(lookVec.X, 0, lookVec.Z)
+                if flatLook.Magnitude < 0.05 then
+                    flatLook = Vector3.new(0, 0, -1)
+                else
+                    flatLook = flatLook.Unit
+                end
+
+                local behindPos = eRoot.Position - (flatLook * Config.Memory.BehindStuds)
+                myRoot.CFrame = CFrame.new(behindPos, Vector3.new(eRoot.Position.X, behindPos.Y, eRoot.Position.Z))
+                myRoot.AssemblyLinearVelocity = Vector3.zero
+
+                -- Khóa thẳng tâm Camera vào đầu/thân địch và tự động kích hoạt bắn/đánh
+                Camera.CFrame = CFrame.new(Camera.CFrame.Position, eHead.Position)
+                TriggerAutoAttack()
+
+                MemTargetStatus.Text = string.format(
+                    'Mục tiêu: <font color="#35e060">%s</font> | HP: <font color="#ffdf5d">%d</font> | Cách: <font color="#63b3ff">%dm</font>',
+                    chosenEnemy.Name,
+                    math.floor(eHum.Health),
+                    chosenDistMeters
+                )
+            end
+        else
+            MemTargetStatus.Text = 'Mục tiêu hiện tại: <font color="#ff9d5c">Không có địch nào trong phạm vi 70m</font>'
+        end
+    else
+        MemTargetStatus.Text = 'Mục tiêu hiện tại: <font color="#9096a4">Đang chờ kích hoạt...</font>'
+    end
+
+    -- BƯỚC 2: TÍNH TOÁN & XOAY CAMERA AIMBOT TRƯỚC KHI VẼ ESP
     if Config.Aim.Enabled and IsShooting then
         local bestTargetHead = nil
         local closestDistToCenter = Config.Aim.FOVRadius
@@ -931,7 +1448,7 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
         end
     end
 
-    -- BƯỚC 2: CHIẾU TỌA ĐỘ MÀN HÌNH & VẼ ESP BẰNG MA TRẬN CAMERA MỚI NHẤT + LỌC KHOẢNG CÁCH (1-500m)
+    -- BƯỚC 3: CHIẾU TỌA ĐỘ MÀN HÌNH & VẼ ESP BẰNG MA TRẬN CAMERA MỚI NHẤT + LỌC KHOẢNG CÁCH (1-500m)
     local activeLookup = {}
     local fovFactor = 1 / math.tan(math.rad(Camera.FieldOfView * 0.5))
 
@@ -944,14 +1461,12 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
         local hum = enemyChar:FindFirstChildOfClass("Humanoid")
 
         if root and head and hum and hum.Health > 0 then
-            -- Tính khoảng cách thực tế (mét) và so sánh với thanh trượt Khoảng cách ESP (1-500m)
             local distStuds = myRoot and (myRoot.Position - root.Position).Magnitude or (Camera.CFrame.Position - root.Position).Magnitude
             local distMeters = math.max(1, math.floor(distStuds * 0.28 + 0.5))
 
             if distMeters <= Config.ESP.MaxDistance then
                 local rootScreen, rootOnScreen = Camera:WorldToViewportPoint(root.Position)
 
-                -- Chỉ vẽ khi tâm thân người thật sự nằm phía trước mặt phẳng Camera (Z > 0.5) để chống lật/kéo lệch hộp ở cự ly gần
                 if rootScreen.Z > 0.5 then
                     local topWorld = root.Position + Vector3.new(0, 2.6, 0)
                     local bottomWorld = root.Position - Vector3.new(0, 3.0, 0)
@@ -965,13 +1480,11 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
                         boxHeight = math.clamp(math.abs(bottomScreen.Y - topScreen.Y), 12, viewportSize.Y * 1.5)
                         boxPosY = math.min(topScreen.Y, bottomScreen.Y)
                     else
-                        -- Dự phòng chiều cao theo độ sâu Z khi địch áp sát < 3m để hộp không bị phóng lệch
                         boxHeight = math.clamp((5.6 / rootScreen.Z) * (viewportSize.Y * 0.5) * fovFactor, 12, viewportSize.Y * 1.2)
                         boxPosY = rootScreen.Y - (boxHeight * 0.5)
                     end
 
                     local boxWidth = math.max(boxHeight * 0.58, 8)
-                    -- Cố định trục ngang theo rootScreen.X thay vì Head để khi địch/mình vung tay tấn công hộp không bị lắc ngang
                     local boxPosX = rootScreen.X - (boxWidth * 0.5)
 
                     local isInsideViewport = (boxPosX + boxWidth >= 0)
@@ -980,7 +1493,6 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
                         and (boxPosY <= viewportSize.Y)
 
                     if rootOnScreen or isInsideViewport then
-                        -- 1. Định vị Hộp 2D
                         if Config.ESP.Box2D then
                             node.Box.Position = UDim2.new(0, boxPosX, 0, boxPosY)
                             node.Box.Size = UDim2.new(0, boxWidth, 0, boxHeight)
@@ -989,7 +1501,6 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
                             node.Box.Visible = false
                         end
 
-                        -- 2. Thanh máu
                         local hpRatio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
                         if Config.ESP.Health then
                             node.HealthBG.Position = UDim2.new(0, boxPosX - 6, 0, boxPosY)
@@ -1001,7 +1512,6 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
                             node.HealthBG.Visible = false
                         end
 
-                        -- 3. Nhãn số máu & Khoảng cách
                         if Config.ESP.Health or Config.ESP.Distance then
                             local parts = {}
                             if Config.ESP.Health then
@@ -1023,7 +1533,6 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
                     HideESPNode(node)
                 end
             else
-                -- Mục tiêu nằm ngoài phạm vi Khoảng cách ESP (1-500m) đã chọn
                 HideESPNode(node)
             end
         else
