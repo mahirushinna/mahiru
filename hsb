@@ -1,10 +1,12 @@
 -- Language: Luau (Roblox Executor)
--- Module: MonicaHub_KillstreakBR_v1_3.lua
+-- Module: MonicaHub_KillstreakBR_v1_4.lua
 -- Runtime: Roblox Client / Mobile & PC Executors
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local Workspace = game:GetService("Workspace")
 
@@ -33,16 +35,22 @@ local Config = {
         RequiredKey = "monica",
         TeleBehindEnabled = false, -- Công tắc tổng trong tab Memory (bật lên sẽ hiện nút nổi "telesau")
         TeleActive = true,         -- Trạng thái của nút nổi "telesau": true = Xanh (Hoạt động), false = Đỏ (Dừng)
-        MaxRange = 120,            -- Phạm vi 120m theo yêu cầu mới
+        MaxRange = 120,            -- Phạm vi Tele 120m
         TargetPriority = "LowestHP", -- "LowestHP" (Địch yếu máu nhất) | "Closest" (Địch gần nhất)
-        BehindStuds = 3.5          -- Khoảng cách đứng sau lưng địch (studs)
+        BehindStuds = 3.5,         -- Khoảng cách đứng sau lưng địch
+        SpeedEnabled = false,      -- Bật/tắt tăng tốc độ chạy
+        WalkSpeed = 42,            -- Tốc độ chạy tùy chỉnh (16 - 120)
+        FastAttackEnabled = false, -- Bật/tắt tăng tốc bắn/đánh cận chiến tối đa
+        AnimSpeedMultiplier = 6.5  -- Tốc độ tua hoạt ảnh vung vũ khí / lên đạn
     }
 }
 
 local CurrentTabMode = "ALL"
 local IsShooting = false
 local ActiveTouch = nil
-local RenderStepName = "MonicaHub_RenderLoop_v13"
+local LastGCPatchClock = 0
+local OriginalWeaponCache = {}
+local RenderStepName = "MonicaHub_RenderLoop_v14"
 
 -- // DỌN DẸP BẢN CŨ TRƯỚC KHI KHỞI TẠO
 pcall(function()
@@ -166,7 +174,6 @@ PillFPSLabel.Parent = TogglePill
 MakeDraggable(TogglePill, TogglePill)
 
 -- // 1B. NÚT NỔI "telesau" (DỪNG / TIẾP TỤC CHỨC NĂNG TELE RA SAU ĐỊCH)
--- Chỉ hiển thị khi bật chức năng Tele trong phần Memory: Xanh = Hoạt động, Đỏ = Dừng
 local TeleSauPill = Instance.new("TextButton")
 TeleSauPill.Name = "TeleSauPill"
 TeleSauPill.Size = UDim2.new(0, 128, 0, 38)
@@ -225,13 +232,11 @@ MakeDraggable(TeleSauPill, TeleSauPill)
 
 local function UpdateTeleSauPillVisual()
     if Config.Memory.TeleActive then
-        -- Màu xanh: Chức năng đang hoạt động
         TeleDotBadge.BackgroundColor3 = Color3.fromRGB(39, 201, 63)
         TelePillStroke.Color = Color3.fromRGB(39, 201, 63)
         TeleSauText.TextColor3 = Color3.fromRGB(53, 224, 96)
         TeleDotIcon.Text = "ON"
     else
-        -- Màu đỏ: Dừng chức năng
         TeleDotBadge.BackgroundColor3 = Color3.fromRGB(225, 55, 55)
         TelePillStroke.Color = Color3.fromRGB(225, 55, 55)
         TeleSauText.TextColor3 = Color3.fromRGB(255, 85, 85)
@@ -249,8 +254,8 @@ UpdateTeleSauPillVisual()
 -- // 2. CỬA SỔ CHÍNH MONICA HUB
 local MainWindow = Instance.new("Frame")
 MainWindow.Name = "MainWindow"
-MainWindow.Size = UDim2.new(0, 515, 0, 360)
-MainWindow.Position = UDim2.new(0.5, -257, 0.5, -180)
+MainWindow.Size = UDim2.new(0, 525, 0, 390)
+MainWindow.Position = UDim2.new(0.5, -262, 0.5, -195)
 MainWindow.BackgroundColor3 = Color3.fromRGB(26, 28, 32)
 MainWindow.BorderSizePixel = 0
 MainWindow.ZIndex = 5
@@ -385,7 +390,7 @@ local SideInfo = Instance.new("TextLabel")
 SideInfo.Size = UDim2.new(1, -16, 0, 50)
 SideInfo.Position = UDim2.new(0, 10, 1, -56)
 SideInfo.BackgroundTransparency = 1
-SideInfo.Text = "Monica Hub v1.3\nKillstreak BR"
+SideInfo.Text = "Monica Hub v1.4\nKillstreak BR"
 SideInfo.TextColor3 = Color3.fromRGB(115, 120, 130)
 SideInfo.Font = Enum.Font.Gotham
 SideInfo.TextSize = 11
@@ -433,26 +438,7 @@ local TabEspBtn = CreateSubTabButton("Draw Esp", 94, 78)
 local TabAimBtn = CreateSubTabButton("Aimbot", 178, 70)
 local TabMemBtn = CreateSubTabButton("Memory 🔒", 254, 92)
 
--- // KHUNG CHỨA 1: ESP & AIMBOT
-local SwitchContainer = Instance.new("Frame")
-SwitchContainer.Size = UDim2.new(1, -24, 1, -48)
-SwitchContainer.Position = UDim2.new(0, 12, 0, 44)
-SwitchContainer.BackgroundTransparency = 1
-SwitchContainer.ZIndex = 7
-SwitchContainer.Parent = ContentArea
-
-local SectionLabel = Instance.new("TextLabel")
-SectionLabel.Size = UDim2.new(1, 0, 0, 18)
-SectionLabel.Position = UDim2.new(0, 0, 0, 0)
-SectionLabel.BackgroundTransparency = 1
-SectionLabel.Text = "Switch — ESP & Aimbot"
-SectionLabel.TextColor3 = Color3.fromRGB(155, 160, 170)
-SectionLabel.Font = Enum.Font.GothamSemibold
-SectionLabel.TextSize = 12
-SectionLabel.TextXAlignment = Enum.TextXAlignment.Left
-SectionLabel.ZIndex = 8
-SectionLabel.Parent = SwitchContainer
-
+-- // HÀM TẠO CHECKBOX & SLIDER DÙNG CHUNG
 local function CreateCheckbox(parentFrame, labelText, posX, posY, width, defaultState, callback)
     local holder = Instance.new("TextButton")
     holder.Size = UDim2.new(0, width or 170, 0, 28)
@@ -507,56 +493,9 @@ local function CreateCheckbox(parentFrame, labelText, posX, posY, width, default
     return holder
 end
 
--- Cột trái: Các công tắc ESP
-local EspBoxToggle = CreateCheckbox(SwitchContainer, "Định vị hộp 2D", 0, 24, 170, false, function(val)
-    Config.ESP.Box2D = val
-end)
-
-local EspHealthToggle = CreateCheckbox(SwitchContainer, "Lượng máu đối thủ", 0, 56, 170, false, function(val)
-    Config.ESP.Health = val
-end)
-
-local EspDistToggle = CreateCheckbox(SwitchContainer, "Khoảng cách địch", 0, 88, 170, false, function(val)
-    Config.ESP.Distance = val
-end)
-
-local EspFovToggle = CreateCheckbox(SwitchContainer, "ESP vòng Aim (Hiện/Ẩn)", 0, 120, 170, false, function(val)
-    Config.ESP.ShowFOV = val
-end)
-
--- Cột phải: Các công tắc Aimbot
-local AimHeadToggle = CreateCheckbox(SwitchContainer, "Aim đầu địch (Gần tâm)", 180, 24, 175, false, function(val)
-    Config.Aim.Enabled = val
-end)
-
-local AimVisToggle = CreateCheckbox(SwitchContainer, "Check vật cản (Sau tường)", 180, 56, 175, true, function(val)
-    Config.Aim.VisibleCheck = val
-end)
-
-local ShootStateLabel = Instance.new("TextLabel")
-ShootStateLabel.Size = UDim2.new(0, 175, 0, 24)
-ShootStateLabel.Position = UDim2.new(0, 180, 0, 90)
-ShootStateLabel.BackgroundTransparency = 1
-ShootStateLabel.RichText = true
-ShootStateLabel.Text = 'Trạng thái bắn: <font color="#9096a4">Đang thả</font>'
-ShootStateLabel.Font = Enum.Font.GothamSemibold
-ShootStateLabel.TextSize = 11
-ShootStateLabel.TextXAlignment = Enum.TextXAlignment.Left
-ShootStateLabel.ZIndex = 8
-ShootStateLabel.Parent = SwitchContainer
-
-local SettingsDivider = Instance.new("Frame")
-SettingsDivider.Size = UDim2.new(1, 0, 0, 1)
-SettingsDivider.Position = UDim2.new(0, 0, 0, 154)
-SettingsDivider.BackgroundColor3 = Color3.fromRGB(45, 48, 55)
-SettingsDivider.BorderSizePixel = 0
-SettingsDivider.ZIndex = 8
-SettingsDivider.Parent = SwitchContainer
-
--- Hàm tạo Slider
 local function CreateSlider(parentFrame, titlePrefix, suffix, posY, minVal, maxVal, defaultVal, callback)
     local group = Instance.new("Frame")
-    group.Size = UDim2.new(1, 0, 0, 44)
+    group.Size = UDim2.new(1, 0, 0, 42)
     group.Position = UDim2.new(0, 0, 0, posY)
     group.BackgroundTransparency = 1
     group.ZIndex = 8
@@ -576,7 +515,7 @@ local function CreateSlider(parentFrame, titlePrefix, suffix, posY, minVal, maxV
 
     local track = Instance.new("Frame")
     track.Size = UDim2.new(1, -10, 0, 10)
-    track.Position = UDim2.new(0, 0, 0, 24)
+    track.Position = UDim2.new(0, 0, 0, 22)
     track.BackgroundColor3 = Color3.fromRGB(42, 45, 52)
     track.BorderSizePixel = 0
     track.ZIndex = 9
@@ -643,6 +582,72 @@ local function CreateSlider(parentFrame, titlePrefix, suffix, posY, minVal, maxV
     return group
 end
 
+-- // KHUNG CHỨA 1: ESP & AIMBOT
+local SwitchContainer = Instance.new("Frame")
+SwitchContainer.Size = UDim2.new(1, -24, 1, -48)
+SwitchContainer.Position = UDim2.new(0, 12, 0, 44)
+SwitchContainer.BackgroundTransparency = 1
+SwitchContainer.ZIndex = 7
+SwitchContainer.Parent = ContentArea
+
+local SectionLabel = Instance.new("TextLabel")
+SectionLabel.Size = UDim2.new(1, 0, 0, 18)
+SectionLabel.Position = UDim2.new(0, 0, 0, 0)
+SectionLabel.BackgroundTransparency = 1
+SectionLabel.Text = "Switch — ESP & Aimbot"
+SectionLabel.TextColor3 = Color3.fromRGB(155, 160, 170)
+SectionLabel.Font = Enum.Font.GothamSemibold
+SectionLabel.TextSize = 12
+SectionLabel.TextXAlignment = Enum.TextXAlignment.Left
+SectionLabel.ZIndex = 8
+SectionLabel.Parent = SwitchContainer
+
+-- Cột trái: Các công tắc ESP
+local EspBoxToggle = CreateCheckbox(SwitchContainer, "Định vị hộp 2D", 0, 24, 170, false, function(val)
+    Config.ESP.Box2D = val
+end)
+
+local EspHealthToggle = CreateCheckbox(SwitchContainer, "Lượng máu đối thủ", 0, 56, 170, false, function(val)
+    Config.ESP.Health = val
+end)
+
+local EspDistToggle = CreateCheckbox(SwitchContainer, "Khoảng cách địch", 0, 88, 170, false, function(val)
+    Config.ESP.Distance = val
+end)
+
+local EspFovToggle = CreateCheckbox(SwitchContainer, "ESP vòng Aim (Hiện/Ẩn)", 0, 120, 170, false, function(val)
+    Config.ESP.ShowFOV = val
+end)
+
+-- Cột phải: Các công tắc Aimbot
+local AimHeadToggle = CreateCheckbox(SwitchContainer, "Aim đầu địch (Gần tâm)", 180, 24, 175, false, function(val)
+    Config.Aim.Enabled = val
+end)
+
+local AimVisToggle = CreateCheckbox(SwitchContainer, "Check vật cản (Sau tường)", 180, 56, 175, true, function(val)
+    Config.Aim.VisibleCheck = val
+end)
+
+local ShootStateLabel = Instance.new("TextLabel")
+ShootStateLabel.Size = UDim2.new(0, 175, 0, 24)
+ShootStateLabel.Position = UDim2.new(0, 180, 0, 90)
+ShootStateLabel.BackgroundTransparency = 1
+ShootStateLabel.RichText = true
+ShootStateLabel.Text = 'Trạng thái bắn: <font color="#9096a4">Đang thả</font>'
+ShootStateLabel.Font = Enum.Font.GothamSemibold
+ShootStateLabel.TextSize = 11
+ShootStateLabel.TextXAlignment = Enum.TextXAlignment.Left
+ShootStateLabel.ZIndex = 8
+ShootStateLabel.Parent = SwitchContainer
+
+local SettingsDivider = Instance.new("Frame")
+SettingsDivider.Size = UDim2.new(1, 0, 0, 1)
+SettingsDivider.Position = UDim2.new(0, 0, 0, 154)
+SettingsDivider.BackgroundColor3 = Color3.fromRGB(45, 48, 55)
+SettingsDivider.BorderSizePixel = 0
+SettingsDivider.ZIndex = 8
+SettingsDivider.Parent = SwitchContainer
+
 local EspDistSliderGroup = CreateSlider(
     SwitchContainer,
     "Khoảng cách ESP tối đa (1-500m)",
@@ -669,21 +674,233 @@ local AimFovSliderGroup = CreateSlider(
     end
 )
 
+-- // CƠ CHẾ ÉP TỐC ĐỘ BẮN / ĐÁNH CẬN CHIẾN NHANH NHẤT CÓ THỂ (FAST FIRE & MELEE)
+local FastCooldownKeywords = {
+    "cooldown", "firerate", "fire_rate", "attackdelay", "attack_delay",
+    "swingdelay", "swingcooldown", "delay", "reloadtime", "reload_time",
+    "recovery", "endlag", "windup", "debounce", "interval", "wait", "chargerate"
+}
+
+local FastSpeedKeywords = {
+    "attackspeed", "attack_speed", "swingspeed", "swing_speed", "rpm", "firespeed"
+}
+
+local function MatchesKeywordList(str, list)
+    local lower = string.lower(tostring(str))
+    for _, kw in ipairs(list) do
+        if string.find(lower, kw, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Lớp 1: Ép toàn bộ Attribute và NumberValue/IntValue của vũ khí đang cầm & trong Backpack
+local function PatchWeaponInstance(inst)
+    if not inst then return end
+
+    pcall(function()
+        local attrs = inst:GetAttributes()
+        for k, v in pairs(attrs) do
+            if type(v) == "number" then
+                if MatchesKeywordList(k, FastCooldownKeywords) then
+                    inst:SetAttribute(k, 0.001)
+                elseif MatchesKeywordList(k, FastSpeedKeywords) then
+                    inst:SetAttribute(k, math.max(v * 5, 25))
+                end
+            end
+        end
+    end)
+
+    for _, desc in ipairs(inst:GetDescendants()) do
+        if desc:IsA("NumberValue") or desc:IsA("IntValue") then
+            if MatchesKeywordList(desc.Name, FastCooldownKeywords) then
+                pcall(function()
+                    if desc:IsA("IntValue") then
+                        desc.Value = 0
+                    else
+                        desc.Value = 0.001
+                    end
+                end)
+            elseif MatchesKeywordList(desc.Name, FastSpeedKeywords) then
+                pcall(function()
+                    desc.Value = math.max(desc.Value * 5, 25)
+                end)
+            end
+        end
+        pcall(function()
+            local subAttrs = desc:GetAttributes()
+            for k, v in pairs(subAttrs) do
+                if type(v) == "number" then
+                    if MatchesKeywordList(k, FastCooldownKeywords) then
+                        desc:SetAttribute(k, 0.001)
+                    elseif MatchesKeywordList(k, FastSpeedKeywords) then
+                        desc:SetAttribute(k, math.max(v * 5, 25))
+                    end
+                end
+            end
+        end)
+    end
+end
+
+-- Lớp 2: Quét bảng cấu hình vũ khí trong bộ nhớ Lua (getgc) của Killstreak Battle Royale
+local function PatchWeaponMemoryTables()
+    if not Config.Memory.FastAttackEnabled then return end
+    local now = os.clock()
+    if now - LastGCPatchClock < 1.5 then return end
+    LastGCPatchClock = now
+
+    -- Quét các Module cấu hình vũ khí trong ReplicatedStorage nếu có
+    pcall(function()
+        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj:IsA("Configuration") or obj:IsA("Folder") then
+                local n = string.lower(obj.Name)
+                if string.find(n, "weapon") or string.find(n, "gun") or string.find(n, "melee") or string.find(n, "talon") or string.find(n, "rift") then
+                    PatchWeaponInstance(obj)
+                end
+            end
+        end
+    end)
+
+    -- Quét trực tiếp bảng Lua trên Executor hỗ trợ getgc(true)
+    if type(getgc) == "function" then
+        pcall(function()
+            local gcObjects = getgc(true)
+            for i = 1, #gcObjects do
+                local tbl = gcObjects[i]
+                if type(tbl) == "table" then
+                    -- Nhận diện bảng chứa thông số vũ khí
+                    local hasWeaponKey = rawget(tbl, "FireRate") ~= nil
+                        or rawget(tbl, "Cooldown") ~= nil
+                        or rawget(tbl, "AttackDelay") ~= nil
+                        or rawget(tbl, "SwingCooldown") ~= nil
+                        or rawget(tbl, "ReloadTime") ~= nil
+                        or rawget(tbl, "FireDelay") ~= nil
+                        or rawget(tbl, "AttackSpeed") ~= nil
+
+                    if hasWeaponKey then
+                        if type(rawget(tbl, "Cooldown")) == "number" then rawset(tbl, "Cooldown", 0.01) end
+                        if type(rawget(tbl, "AttackDelay")) == "number" then rawset(tbl, "AttackDelay", 0.01) end
+                        if type(rawget(tbl, "SwingCooldown")) == "number" then rawset(tbl, "SwingCooldown", 0.01) end
+                        if type(rawget(tbl, "SwingDelay")) == "number" then rawset(tbl, "SwingDelay", 0.01) end
+                        if type(rawget(tbl, "FireDelay")) == "number" then rawset(tbl, "FireDelay", 0.01) end
+                        if type(rawget(tbl, "ShotDelay")) == "number" then rawset(tbl, "ShotDelay", 0.01) end
+                        if type(rawget(tbl, "ReloadTime")) == "number" then rawset(tbl, "ReloadTime", 0.05) end
+                        if type(rawget(tbl, "Debounce")) == "boolean" then rawset(tbl, "Debounce", false) end
+                        if type(rawget(tbl, "AttackSpeed")) == "number" then rawset(tbl, "AttackSpeed", 10) end
+                        if type(rawget(tbl, "RPM")) == "number" then rawset(tbl, "RPM", 2400) end
+                        if type(rawget(tbl, "FireRate")) == "number" then
+                            local fr = rawget(tbl, "FireRate")
+                            -- Nếu FireRate < 5 thì là giây/viên (delay), nếu > 10 thì là viên/phút (RPM)
+                            if fr > 0 and fr < 5 then
+                                rawset(tbl, "FireRate", 0.01)
+                            elseif fr >= 5 then
+                                rawset(tbl, "FireRate", 2400)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end
+
+-- Lớp 3: Tăng tốc toàn bộ AnimationTrack vung đòn cận chiến (Assassin's Talon) & bắn súng (Riftpiercer)
+local function AccelerateAttackAnimations(myChar, myHum)
+    if not (myChar and myHum) then return end
+    local animator = myHum:FindFirstChildOfClass("Animator") or myHum
+    local success, tracks = pcall(function()
+        return animator:GetPlayingAnimationTracks()
+    end)
+    if not (success and tracks) then return end
+
+    for _, track in ipairs(tracks) do
+        local trackName = string.lower(track.Name or "")
+        local animId = (track.Animation and string.lower(track.Animation.AnimationId or "")) or ""
+        local isLocomotion = string.find(trackName, "walk")
+            or string.find(trackName, "run")
+            or string.find(trackName, "idle")
+            or string.find(trackName, "jump")
+            or string.find(trackName, "fall")
+            or string.find(animId, "walk")
+            or string.find(animId, "run")
+            or string.find(animId, "idle")
+
+        -- Nếu không phải hoạt ảnh bước đi/đứng yên hoặc khi người chơi đang đè nút bắn/chém -> tua tốc độ tối đa
+        if not isLocomotion or IsShooting then
+            if IsShooting or string.find(trackName, "slash")
+                or string.find(trackName, "swing")
+                or string.find(trackName, "attack")
+                or string.find(trackName, "punch")
+                or string.find(trackName, "claw")
+                or string.find(trackName, "talon")
+                or string.find(trackName, "shoot")
+                or string.find(trackName, "fire")
+                or string.find(trackName, "reload") then
+                pcall(function()
+                    track:AdjustSpeed(Config.Memory.AnimSpeedMultiplier)
+                end)
+            end
+        end
+    end
+end
+
+-- Lớp 4: Kích hoạt xả đòn / bắn liên thanh tốc độ cao khi đang giữ nút tấn công
+local function TriggerRapidWeaponBurst(myChar)
+    if not myChar then return end
+    PatchWeaponInstance(myChar)
+
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp then
+        for _, item in ipairs(bp:GetChildren()) do
+            if item:IsA("Tool") then
+                PatchWeaponInstance(item)
+            end
+        end
+    end
+
+    -- Kích hoạt Tool:Activate() và Remote tấn công trong vũ khí nếu đang giữ nút bắn/đánh
+    if IsShooting then
+        for _, child in ipairs(myChar:GetChildren()) do
+            if child:IsA("Tool") then
+                pcall(function()
+                    child.Enabled = true
+                    child:Activate()
+                end)
+                for _, rem in ipairs(child:GetDescendants()) do
+                    if rem:IsA("RemoteEvent") then
+                        local rName = string.lower(rem.Name)
+                        if string.find(rName, "attack") or string.find(rName, "swing") or string.find(rName, "slash") or string.find(rName, "hit") then
+                            pcall(function()
+                                rem:FireServer()
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 -- // KHUNG CHỨA 2: PHẦN MEMORY (CHỈ MỞ KHI NHẬP ĐÚNG KEY "monica")
-local MemoryContainer = Instance.new("Frame")
+local MemoryContainer = Instance.new("ScrollingFrame")
 MemoryContainer.Name = "MemoryContainer"
-MemoryContainer.Size = UDim2.new(1, -24, 1, -48)
+MemoryContainer.Size = UDim2.new(1, -20, 1, -48)
 MemoryContainer.Position = UDim2.new(0, 12, 0, 44)
 MemoryContainer.BackgroundTransparency = 1
+MemoryContainer.BorderSizePixel = 0
+MemoryContainer.ScrollBarThickness = 4
+MemoryContainer.ScrollBarImageColor3 = Color3.fromRGB(55, 130, 240)
+MemoryContainer.CanvasSize = UDim2.new(0, 0, 0, 340)
 MemoryContainer.Visible = false
 MemoryContainer.ZIndex = 7
 MemoryContainer.Parent = ContentArea
 
 local MemSwitchHeader = Instance.new("TextLabel")
-MemSwitchHeader.Size = UDim2.new(1, 0, 0, 18)
+MemSwitchHeader.Size = UDim2.new(1, -10, 0, 18)
 MemSwitchHeader.Position = UDim2.new(0, 0, 0, 0)
 MemSwitchHeader.BackgroundTransparency = 1
-MemSwitchHeader.Text = "Switch — Memory (Phạm vi 120m)"
+MemSwitchHeader.Text = "Switch — Memory (Tele 120m, Tốc Chạy & Tốc Bắn/Đánh)"
 MemSwitchHeader.TextColor3 = Color3.fromRGB(155, 160, 170)
 MemSwitchHeader.Font = Enum.Font.GothamSemibold
 MemSwitchHeader.TextSize = 12
@@ -691,30 +908,29 @@ MemSwitchHeader.TextXAlignment = Enum.TextXAlignment.Left
 MemSwitchHeader.ZIndex = 8
 MemSwitchHeader.Parent = MemoryContainer
 
+-- 1. Công tắc Tele 120m + nút nổi telesau
 local TeleBehindToggle = CreateCheckbox(
     MemoryContainer,
     "Tele nhanh ra sau địch (≤120m) [Hiện nút telesau]",
     0,
-    26,
-    350,
+    22,
+    355,
     false,
     function(val)
         Config.Memory.TeleBehindEnabled = val
         if val then
-            -- Khi vừa bật chức năng: tự hiện nút nổi "telesau" ở trạng thái Xanh (Hoạt động)
             Config.Memory.TeleActive = true
             UpdateTeleSauPillVisual()
             TeleSauPill.Visible = true
         else
-            -- Khi tắt chức năng trong menu: ẩn nút nổi "telesau"
             TeleSauPill.Visible = false
         end
     end
 )
 
 local MemTargetStatus = Instance.new("TextLabel")
-MemTargetStatus.Size = UDim2.new(1, 0, 0, 20)
-MemTargetStatus.Position = UDim2.new(0, 0, 0, 60)
+MemTargetStatus.Size = UDim2.new(1, -10, 0, 18)
+MemTargetStatus.Position = UDim2.new(0, 0, 0, 52)
 MemTargetStatus.BackgroundTransparency = 1
 MemTargetStatus.RichText = true
 MemTargetStatus.Text = 'Mục tiêu hiện tại: <font color="#9096a4">Đang chờ kích hoạt...</font>'
@@ -724,19 +940,71 @@ MemTargetStatus.TextXAlignment = Enum.TextXAlignment.Left
 MemTargetStatus.ZIndex = 8
 MemTargetStatus.Parent = MemoryContainer
 
+-- 2. Công tắc Tăng tốc bắn / đánh cận chiến nhanh nhất có thể
+local FastAttackToggle = CreateCheckbox(
+    MemoryContainer,
+    "Tăng tốc bắn / đánh vũ khí tầm gần tối đa (Max Speed)",
+    0,
+    74,
+    365,
+    false,
+    function(val)
+        Config.Memory.FastAttackEnabled = val
+        if val then
+            LastGCPatchClock = 0
+            PatchWeaponMemoryTables()
+            if LocalPlayer.Character then
+                PatchWeaponInstance(LocalPlayer.Character)
+            end
+        end
+    end
+)
+
+-- 3. Công tắc Tăng tốc độ chạy tùy chỉnh + Thanh kéo Tốc độ chạy
+local CustomSpeedToggle = CreateCheckbox(
+    MemoryContainer,
+    "Bật tăng tốc độ chạy tùy chỉnh (WalkSpeed)",
+    0,
+    104,
+    355,
+    false,
+    function(val)
+        Config.Memory.SpeedEnabled = val
+        if not val and LocalPlayer.Character then
+            local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then
+                hum.WalkSpeed = 16
+            end
+        end
+    end
+)
+
+local WalkSpeedSliderGroup = CreateSlider(
+    MemoryContainer,
+    "Tùy chỉnh tốc độ chạy (16-120)",
+    "",
+    136,
+    16,
+    120,
+    Config.Memory.WalkSpeed,
+    function(val)
+        Config.Memory.WalkSpeed = val
+    end
+)
+
 local MemDivider = Instance.new("Frame")
-MemDivider.Size = UDim2.new(1, 0, 0, 1)
-MemDivider.Position = UDim2.new(0, 0, 0, 88)
+MemDivider.Size = UDim2.new(1, -12, 0, 1)
+MemDivider.Position = UDim2.new(0, 0, 0, 186)
 MemDivider.BackgroundColor3 = Color3.fromRGB(45, 48, 55)
 MemDivider.BorderSizePixel = 0
 MemDivider.ZIndex = 8
 MemDivider.Parent = MemoryContainer
 
 local MemSettingsHeader = Instance.new("TextLabel")
-MemSettingsHeader.Size = UDim2.new(1, 0, 0, 18)
-MemSettingsHeader.Position = UDim2.new(0, 0, 0, 96)
+MemSettingsHeader.Size = UDim2.new(1, -10, 0, 18)
+MemSettingsHeader.Position = UDim2.new(0, 0, 0, 194)
 MemSettingsHeader.BackgroundTransparency = 1
-MemSettingsHeader.Text = "Settings — Cách lựa chọn mục tiêu (120m)"
+MemSettingsHeader.Text = "Settings — Cách lựa chọn mục tiêu Tele (120m)"
 MemSettingsHeader.TextColor3 = Color3.fromRGB(155, 160, 170)
 MemSettingsHeader.Font = Enum.Font.GothamSemibold
 MemSettingsHeader.TextSize = 12
@@ -748,7 +1016,7 @@ MemSettingsHeader.Parent = MemoryContainer
 local DropdownBar = Instance.new("TextButton")
 DropdownBar.Name = "TargetPriorityDropdown"
 DropdownBar.Size = UDim2.new(0, 260, 0, 28)
-DropdownBar.Position = UDim2.new(0, 0, 0, 122)
+DropdownBar.Position = UDim2.new(0, 0, 0, 218)
 DropdownBar.BackgroundColor3 = Color3.fromRGB(43, 46, 53)
 DropdownBar.BorderSizePixel = 0
 DropdownBar.Text = ""
@@ -801,7 +1069,7 @@ ArrowIcon.Parent = DropdownArrowBox
 
 local HelpMark = Instance.new("TextLabel")
 HelpMark.Size = UDim2.new(0, 28, 0, 28)
-HelpMark.Position = UDim2.new(0, 268, 0, 122)
+HelpMark.Position = UDim2.new(0, 268, 0, 218)
 HelpMark.BackgroundTransparency = 1
 HelpMark.Text = "(?)"
 HelpMark.TextColor3 = Color3.fromRGB(145, 150, 160)
@@ -813,7 +1081,7 @@ HelpMark.Parent = MemoryContainer
 local DropdownListFrame = Instance.new("Frame")
 DropdownListFrame.Name = "DropdownListFrame"
 DropdownListFrame.Size = UDim2.new(0, 260, 0, 58)
-DropdownListFrame.Position = UDim2.new(0, 0, 0, 152)
+DropdownListFrame.Position = UDim2.new(0, 0, 0, 248)
 DropdownListFrame.BackgroundColor3 = Color3.fromRGB(34, 37, 43)
 DropdownListFrame.BorderSizePixel = 0
 DropdownListFrame.Visible = false
@@ -1116,7 +1384,7 @@ FOVStroke.Thickness = 1.5
 FOVStroke.Transparency = 0.15
 FOVStroke.Parent = FOVCircleFrame
 
--- // 5. NHẬN DIỆN ẤN GIỮ NÚT TẤN CÔNG / NÚT BẮN (DÀNH CHO AIMBOT)
+-- // 5. NHẬN DIỆN ẤN GIỮ NÚT TẤN CÔNG / NÚT BẮN (DÀNH CHO AIMBOT & FAST ATTACK)
 local function IsPointOverShootControl(screenPos)
     local pGui = LocalPlayer:FindFirstChild("PlayerGui")
     if pGui then
@@ -1131,6 +1399,7 @@ local function IsPointOverShootControl(screenPos)
                     or string.find(nameLower, "bullet")
                     or string.find(nameLower, "punch")
                     or string.find(nameLower, "melee")
+                    or string.find(nameLower, "slash")
                     or string.find(parentLower, "fire")
                     or string.find(parentLower, "shoot")
                     or string.find(parentLower, "attack") then
@@ -1140,6 +1409,7 @@ local function IsPointOverShootControl(screenPos)
         end
     end
 
+    -- Vùng nút viên đạn / dao găm bên phải màn hình trong Killstreak Battle Royale (từ video)
     local vp = Camera.ViewportSize
     local normX = screenPos.X / vp.X
     local normY = screenPos.Y / vp.Y
@@ -1168,7 +1438,6 @@ local function IsPointInsideFrame(pos, frame)
 end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    -- Bỏ qua nếu người dùng đang bấm vào cửa sổ Menu hoặc 2 nút nổi
     if IsPointInsideFrame(input.Position, MainWindow)
         or IsPointInsideFrame(input.Position, TogglePill)
         or IsPointInsideFrame(input.Position, TeleSauPill) then
@@ -1371,11 +1640,11 @@ local function HasClearLineOfSight(targetPart, targetCharacter)
     return false
 end
 
--- // 8. VÒNG LẶP ĐỒNG BỘ: MEMORY TELE 120M (KHÔNG TỰ ĐÁNH) -> AIMBOT -> ESP
+-- // 8. VÒNG LẶP ĐỒNG BỘ: SPEED & FAST ATTACK -> TELE 120M -> AIMBOT -> ESP
 local frameCount = 0
 local lastFPSTime = os.clock()
 
-RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1, function()
+RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1, function(deltaTime)
     Camera = Workspace.CurrentCamera
     if not Camera then return end
 
@@ -1403,7 +1672,28 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
 
-    -- BƯỚC 1: CHỨC NĂNG MEMORY — CHỈ TELE NHANH RA SAU ĐỊCH TRONG PHẠM VI 120M (KHÔNG TỰ BẮN/ĐÁNH)
+    -- BƯỚC 1A: CHỨC NĂNG MEMORY — TĂNG TỐC ĐỘ CHẠY TÙY CHỈNH (WALKSPEED + VELOCITY TRANSLATE)
+    if Config.Memory.Unlocked and Config.Memory.SpeedEnabled and myRoot and myHum and myHum.Health > 0 then
+        local targetSpeed = Config.Memory.WalkSpeed
+        myHum.WalkSpeed = targetSpeed
+
+        -- Bù thêm quãng đường theo hướng di chuyển khi game ép lại WalkSpeed mặc định lúc vung vũ khí / ngắm bắn
+        if myHum.MoveDirection.Magnitude > 0.05 and targetSpeed > 16 then
+            local extraSpeed = math.max(0, targetSpeed - myHum.WalkSpeed)
+            if extraSpeed > 0 then
+                myRoot.CFrame = myRoot.CFrame + (myHum.MoveDirection * extraSpeed * math.clamp(deltaTime, 0.001, 0.05))
+            end
+        end
+    end
+
+    -- BƯỚC 1B: CHỨC NĂNG MEMORY — TĂNG TỐC BẮN / ĐÁNH VŨ KHÍ TẦM GẦN NHANH NHẤT CÓ THỂ
+    if Config.Memory.Unlocked and Config.Memory.FastAttackEnabled and myChar and myHum and myHum.Health > 0 then
+        PatchWeaponMemoryTables()
+        AccelerateAttackAnimations(myChar, myHum)
+        TriggerRapidWeaponBurst(myChar)
+    end
+
+    -- BƯỚC 1C: CHỨC NĂNG MEMORY — CHỈ TELE NHANH RA SAU ĐỊCH TRONG PHẠM VI 120M (KHÔNG TỰ BẮN/ĐÁNH)
     if Config.Memory.Unlocked and Config.Memory.TeleBehindEnabled then
         if Config.Memory.TeleActive then
             if myRoot and myHum and myHum.Health > 0 then
@@ -1419,7 +1709,6 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
                         local distStuds = (myRoot.Position - eRoot.Position).Magnitude
                         local distMeters = distStuds * 0.28
 
-                        -- Chỉ quét mục tiêu trong bán kính 120m
                         if distMeters <= Config.Memory.MaxRange then
                             if Config.Memory.TargetPriority == "LowestHP" then
                                 local score = (eHum.Health * 1000) + distMeters
@@ -1444,7 +1733,6 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
                     local eHum = chosenEnemy:FindFirstChildOfClass("Humanoid")
 
                     if eRoot and eHum then
-                        -- Tính vị trí ngay phía sau lưng địch và quay mặt nhân vật về phía lưng địch (không tự động bắn/đánh)
                         local lookVec = eRoot.CFrame.LookVector
                         local flatLook = Vector3.new(lookVec.X, 0, lookVec.Z)
                         if flatLook.Magnitude < 0.05 then
