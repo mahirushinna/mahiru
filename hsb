@@ -1,12 +1,10 @@
 -- Language: Luau (Roblox Executor)
--- Module: MonicaHub_KillstreakBR_v1_4.lua
+-- Module: MonicaHub_KillstreakBR_v1_5.lua
 -- Runtime: Roblox Client / Mobile & PC Executors
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local Workspace = game:GetService("Workspace")
 
@@ -33,24 +31,28 @@ local Config = {
     Memory = {
         Unlocked = false,
         RequiredKey = "monica",
-        TeleBehindEnabled = false, -- Công tắc tổng trong tab Memory (bật lên sẽ hiện nút nổi "telesau")
-        TeleActive = true,         -- Trạng thái của nút nổi "telesau": true = Xanh (Hoạt động), false = Đỏ (Dừng)
-        MaxRange = 120,            -- Phạm vi Tele 120m
+        TeleBehindEnabled = false,  -- Công tắc tổng trong tab Memory (bật lên sẽ hiện nút nổi "telesau")
+        TeleActive = true,          -- Trạng thái của nút nổi "telesau": true = Xanh (Hoạt động), false = Đỏ (Dừng)
+        MaxRange = 120,             -- Phạm vi Tele 120m
         TargetPriority = "LowestHP", -- "LowestHP" (Địch yếu máu nhất) | "Closest" (Địch gần nhất)
-        BehindStuds = 3.5,         -- Khoảng cách đứng sau lưng địch
-        SpeedEnabled = false,      -- Bật/tắt tăng tốc độ chạy
-        WalkSpeed = 42,            -- Tốc độ chạy tùy chỉnh (16 - 120)
-        FastAttackEnabled = false, -- Bật/tắt tăng tốc bắn/đánh cận chiến tối đa
-        AnimSpeedMultiplier = 6.5  -- Tốc độ tua hoạt ảnh vung vũ khí / lên đạn
+        BehindStuds = 3.5,          -- Khoảng cách đứng sau lưng địch
+        SpeedEnabled = false,       -- Bật/tắt tăng tốc độ chạy
+        WalkSpeed = 42,             -- Tốc độ chạy tùy chỉnh (16 - 120)
+        FlyEnabled = false,         -- Bật/tắt chức năng Bay (Fly)
+        FlySpeed = 55,              -- Tốc độ bay tùy chỉnh (10 - 150)
+        NoclipEnabled = false       -- Bật/tắt chức năng Xuyên tường (Noclip)
     }
 }
 
 local CurrentTabMode = "ALL"
 local IsShooting = false
 local ActiveTouch = nil
-local LastGCPatchClock = 0
-local OriginalWeaponCache = {}
-local RenderStepName = "MonicaHub_RenderLoop_v14"
+local RenderStepName = "MonicaHub_RenderLoop_v15"
+local SteppedConn = nil
+
+local FlyBodyVelocity = nil
+local FlyBodyGyro = nil
+local OriginalCollideState = {}
 
 -- // DỌN DẸP BẢN CŨ TRƯỚC KHI KHỞI TẠO
 pcall(function()
@@ -254,8 +256,8 @@ UpdateTeleSauPillVisual()
 -- // 2. CỬA SỔ CHÍNH MONICA HUB
 local MainWindow = Instance.new("Frame")
 MainWindow.Name = "MainWindow"
-MainWindow.Size = UDim2.new(0, 525, 0, 390)
-MainWindow.Position = UDim2.new(0.5, -262, 0.5, -195)
+MainWindow.Size = UDim2.new(0, 525, 0, 395)
+MainWindow.Position = UDim2.new(0.5, -262, 0.5, -197)
 MainWindow.BackgroundColor3 = Color3.fromRGB(26, 28, 32)
 MainWindow.BorderSizePixel = 0
 MainWindow.ZIndex = 5
@@ -390,7 +392,7 @@ local SideInfo = Instance.new("TextLabel")
 SideInfo.Size = UDim2.new(1, -16, 0, 50)
 SideInfo.Position = UDim2.new(0, 10, 1, -56)
 SideInfo.BackgroundTransparency = 1
-SideInfo.Text = "Monica Hub v1.4\nKillstreak BR"
+SideInfo.Text = "Monica Hub v1.5\nKillstreak BR"
 SideInfo.TextColor3 = Color3.fromRGB(115, 120, 130)
 SideInfo.Font = Enum.Font.Gotham
 SideInfo.TextSize = 11
@@ -674,213 +676,121 @@ local AimFovSliderGroup = CreateSlider(
     end
 )
 
--- // CƠ CHẾ ÉP TỐC ĐỘ BẮN / ĐÁNH CẬN CHIẾN NHANH NHẤT CÓ THỂ (FAST FIRE & MELEE)
-local FastCooldownKeywords = {
-    "cooldown", "firerate", "fire_rate", "attackdelay", "attack_delay",
-    "swingdelay", "swingcooldown", "delay", "reloadtime", "reload_time",
-    "recovery", "endlag", "windup", "debounce", "interval", "wait", "chargerate"
-}
+-- // CƠ CHẾ XỬ LÝ FLY (BAY 3D) & NOCLIP (XUYÊN TƯỜNG)
+local function StopFlyMechanics()
+    if FlyBodyVelocity then
+        pcall(function() FlyBodyVelocity:Destroy() end)
+        FlyBodyVelocity = nil
+    end
+    if FlyBodyGyro then
+        pcall(function() FlyBodyGyro:Destroy() end)
+        FlyBodyGyro = nil
+    end
 
-local FastSpeedKeywords = {
-    "attackspeed", "attack_speed", "swingspeed", "swing_speed", "rpm", "firespeed"
-}
-
-local function MatchesKeywordList(str, list)
-    local lower = string.lower(tostring(str))
-    for _, kw in ipairs(list) do
-        if string.find(lower, kw, 1, true) then
-            return true
+    local myChar = LocalPlayer.Character
+    if myChar then
+        local myHum = myChar:FindFirstChildOfClass("Humanoid")
+        if myHum then
+            myHum.PlatformStand = false
         end
     end
-    return false
 end
 
--- Lớp 1: Ép toàn bộ Attribute và NumberValue/IntValue của vũ khí đang cầm & trong Backpack
-local function PatchWeaponInstance(inst)
-    if not inst then return end
-
-    pcall(function()
-        local attrs = inst:GetAttributes()
-        for k, v in pairs(attrs) do
-            if type(v) == "number" then
-                if MatchesKeywordList(k, FastCooldownKeywords) then
-                    inst:SetAttribute(k, 0.001)
-                elseif MatchesKeywordList(k, FastSpeedKeywords) then
-                    inst:SetAttribute(k, math.max(v * 5, 25))
-                end
-            end
+local function RestoreNoclipCollision()
+    for part, origCollide in pairs(OriginalCollideState) do
+        if part and part.Parent then
+            pcall(function()
+                part.CanCollide = origCollide
+            end)
         end
-    end)
+    end
+    OriginalCollideState = {}
+end
 
-    for _, desc in ipairs(inst:GetDescendants()) do
-        if desc:IsA("NumberValue") or desc:IsA("IntValue") then
-            if MatchesKeywordList(desc.Name, FastCooldownKeywords) then
-                pcall(function()
-                    if desc:IsA("IntValue") then
-                        desc.Value = 0
-                    else
-                        desc.Value = 0.001
+local function UpdateFlyMovement(myChar, myRoot, myHum, deltaTime)
+    if not (Config.Memory.Unlocked and Config.Memory.FlyEnabled and myChar and myRoot and myHum and myHum.Health > 0) then
+        if FlyBodyVelocity or FlyBodyGyro then
+            StopFlyMechanics()
+        end
+        return
+    end
+
+    -- Tạo bộ giữ vận tốc và góc xoay trên không nếu chưa có
+    if not FlyBodyVelocity or FlyBodyVelocity.Parent ~= myRoot then
+        if FlyBodyVelocity then pcall(function() FlyBodyVelocity:Destroy() end) end
+        FlyBodyVelocity = Instance.new("BodyVelocity")
+        FlyBodyVelocity.Name = "MonicaFlyBV"
+        FlyBodyVelocity.MaxForce = Vector3.new(1e8, 1e8, 1e8)
+        FlyBodyVelocity.Velocity = Vector3.zero
+        FlyBodyVelocity.P = 12500
+        FlyBodyVelocity.Parent = myRoot
+    end
+
+    if not FlyBodyGyro or FlyBodyGyro.Parent ~= myRoot then
+        if FlyBodyGyro then pcall(function() FlyBodyGyro:Destroy() end) end
+        FlyBodyGyro = Instance.new("BodyGyro")
+        FlyBodyGyro.Name = "MonicaFlyBG"
+        FlyBodyGyro.MaxTorque = Vector3.new(1e8, 1e8, 1e8)
+        FlyBodyGyro.P = 15000
+        FlyBodyGyro.D = 500
+        FlyBodyGyro.CFrame = Camera.CFrame
+        FlyBodyGyro.Parent = myRoot
+    end
+
+    local camCF = Camera.CFrame
+    FlyBodyGyro.CFrame = camCF
+
+    -- Chuyển hướng kéo Joystick (Mobile) hoặc phím WASD (PC) sang không gian 3D của Camera (nhìn lên bay lên, nhìn xuống bay xuống)
+    local moveDir = myHum.MoveDirection
+    local flyDir = Vector3.zero
+
+    if moveDir.Magnitude > 0.01 then
+        local flatLook = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+        local flatRight = Vector3.new(camCF.RightVector.X, 0, camCF.RightVector.Z)
+
+        if flatLook.Magnitude > 0.01 then flatLook = flatLook.Unit end
+        if flatRight.Magnitude > 0.01 then flatRight = flatRight.Unit end
+
+        local forwardInput = moveDir:Dot(flatLook)
+        local rightInput = moveDir:Dot(flatRight)
+
+        flyDir = (camCF.LookVector * forwardInput) + (camCF.RightVector * rightInput)
+    end
+
+    -- Hỗ trợ thêm phím Space (Bay thẳng lên) / LeftControl hoặc C (Bay thẳng xuống) nếu dùng bàn phím
+    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+        flyDir = flyDir + Vector3.new(0, 1, 0)
+    end
+    if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.C) then
+        flyDir = flyDir - Vector3.new(0, 1, 0)
+    end
+
+    if flyDir.Magnitude > 0.01 then
+        flyDir = flyDir.Unit
+        FlyBodyVelocity.Velocity = flyDir * Config.Memory.FlySpeed
+    else
+        FlyBodyVelocity.Velocity = Vector3.zero
+    end
+end
+
+-- Vòng lặp Stepped chuyên dụng cho Noclip (chạy ngay trước bước tính va chạm vật lý của Roblox)
+SteppedConn = RunService.Stepped:Connect(function()
+    if Config.Memory.Unlocked and Config.Memory.NoclipEnabled then
+        local myChar = LocalPlayer.Character
+        if myChar then
+            for _, part in ipairs(myChar:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    if OriginalCollideState[part] == nil then
+                        OriginalCollideState[part] = part.CanCollide
                     end
-                end)
-            elseif MatchesKeywordList(desc.Name, FastSpeedKeywords) then
-                pcall(function()
-                    desc.Value = math.max(desc.Value * 5, 25)
-                end)
-            end
-        end
-        pcall(function()
-            local subAttrs = desc:GetAttributes()
-            for k, v in pairs(subAttrs) do
-                if type(v) == "number" then
-                    if MatchesKeywordList(k, FastCooldownKeywords) then
-                        desc:SetAttribute(k, 0.001)
-                    elseif MatchesKeywordList(k, FastSpeedKeywords) then
-                        desc:SetAttribute(k, math.max(v * 5, 25))
-                    end
-                end
-            end
-        end)
-    end
-end
-
--- Lớp 2: Quét bảng cấu hình vũ khí trong bộ nhớ Lua (getgc) của Killstreak Battle Royale
-local function PatchWeaponMemoryTables()
-    if not Config.Memory.FastAttackEnabled then return end
-    local now = os.clock()
-    if now - LastGCPatchClock < 1.5 then return end
-    LastGCPatchClock = now
-
-    -- Quét các Module cấu hình vũ khí trong ReplicatedStorage nếu có
-    pcall(function()
-        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-            if obj:IsA("Configuration") or obj:IsA("Folder") then
-                local n = string.lower(obj.Name)
-                if string.find(n, "weapon") or string.find(n, "gun") or string.find(n, "melee") or string.find(n, "talon") or string.find(n, "rift") then
-                    PatchWeaponInstance(obj)
-                end
-            end
-        end
-    end)
-
-    -- Quét trực tiếp bảng Lua trên Executor hỗ trợ getgc(true)
-    if type(getgc) == "function" then
-        pcall(function()
-            local gcObjects = getgc(true)
-            for i = 1, #gcObjects do
-                local tbl = gcObjects[i]
-                if type(tbl) == "table" then
-                    -- Nhận diện bảng chứa thông số vũ khí
-                    local hasWeaponKey = rawget(tbl, "FireRate") ~= nil
-                        or rawget(tbl, "Cooldown") ~= nil
-                        or rawget(tbl, "AttackDelay") ~= nil
-                        or rawget(tbl, "SwingCooldown") ~= nil
-                        or rawget(tbl, "ReloadTime") ~= nil
-                        or rawget(tbl, "FireDelay") ~= nil
-                        or rawget(tbl, "AttackSpeed") ~= nil
-
-                    if hasWeaponKey then
-                        if type(rawget(tbl, "Cooldown")) == "number" then rawset(tbl, "Cooldown", 0.01) end
-                        if type(rawget(tbl, "AttackDelay")) == "number" then rawset(tbl, "AttackDelay", 0.01) end
-                        if type(rawget(tbl, "SwingCooldown")) == "number" then rawset(tbl, "SwingCooldown", 0.01) end
-                        if type(rawget(tbl, "SwingDelay")) == "number" then rawset(tbl, "SwingDelay", 0.01) end
-                        if type(rawget(tbl, "FireDelay")) == "number" then rawset(tbl, "FireDelay", 0.01) end
-                        if type(rawget(tbl, "ShotDelay")) == "number" then rawset(tbl, "ShotDelay", 0.01) end
-                        if type(rawget(tbl, "ReloadTime")) == "number" then rawset(tbl, "ReloadTime", 0.05) end
-                        if type(rawget(tbl, "Debounce")) == "boolean" then rawset(tbl, "Debounce", false) end
-                        if type(rawget(tbl, "AttackSpeed")) == "number" then rawset(tbl, "AttackSpeed", 10) end
-                        if type(rawget(tbl, "RPM")) == "number" then rawset(tbl, "RPM", 2400) end
-                        if type(rawget(tbl, "FireRate")) == "number" then
-                            local fr = rawget(tbl, "FireRate")
-                            -- Nếu FireRate < 5 thì là giây/viên (delay), nếu > 10 thì là viên/phút (RPM)
-                            if fr > 0 and fr < 5 then
-                                rawset(tbl, "FireRate", 0.01)
-                            elseif fr >= 5 then
-                                rawset(tbl, "FireRate", 2400)
-                            end
-                        end
-                    end
-                end
-            end
-        end)
-    end
-end
-
--- Lớp 3: Tăng tốc toàn bộ AnimationTrack vung đòn cận chiến (Assassin's Talon) & bắn súng (Riftpiercer)
-local function AccelerateAttackAnimations(myChar, myHum)
-    if not (myChar and myHum) then return end
-    local animator = myHum:FindFirstChildOfClass("Animator") or myHum
-    local success, tracks = pcall(function()
-        return animator:GetPlayingAnimationTracks()
-    end)
-    if not (success and tracks) then return end
-
-    for _, track in ipairs(tracks) do
-        local trackName = string.lower(track.Name or "")
-        local animId = (track.Animation and string.lower(track.Animation.AnimationId or "")) or ""
-        local isLocomotion = string.find(trackName, "walk")
-            or string.find(trackName, "run")
-            or string.find(trackName, "idle")
-            or string.find(trackName, "jump")
-            or string.find(trackName, "fall")
-            or string.find(animId, "walk")
-            or string.find(animId, "run")
-            or string.find(animId, "idle")
-
-        -- Nếu không phải hoạt ảnh bước đi/đứng yên hoặc khi người chơi đang đè nút bắn/chém -> tua tốc độ tối đa
-        if not isLocomotion or IsShooting then
-            if IsShooting or string.find(trackName, "slash")
-                or string.find(trackName, "swing")
-                or string.find(trackName, "attack")
-                or string.find(trackName, "punch")
-                or string.find(trackName, "claw")
-                or string.find(trackName, "talon")
-                or string.find(trackName, "shoot")
-                or string.find(trackName, "fire")
-                or string.find(trackName, "reload") then
-                pcall(function()
-                    track:AdjustSpeed(Config.Memory.AnimSpeedMultiplier)
-                end)
-            end
-        end
-    end
-end
-
--- Lớp 4: Kích hoạt xả đòn / bắn liên thanh tốc độ cao khi đang giữ nút tấn công
-local function TriggerRapidWeaponBurst(myChar)
-    if not myChar then return end
-    PatchWeaponInstance(myChar)
-
-    local bp = LocalPlayer:FindFirstChild("Backpack")
-    if bp then
-        for _, item in ipairs(bp:GetChildren()) do
-            if item:IsA("Tool") then
-                PatchWeaponInstance(item)
-            end
-        end
-    end
-
-    -- Kích hoạt Tool:Activate() và Remote tấn công trong vũ khí nếu đang giữ nút bắn/đánh
-    if IsShooting then
-        for _, child in ipairs(myChar:GetChildren()) do
-            if child:IsA("Tool") then
-                pcall(function()
-                    child.Enabled = true
-                    child:Activate()
-                end)
-                for _, rem in ipairs(child:GetDescendants()) do
-                    if rem:IsA("RemoteEvent") then
-                        local rName = string.lower(rem.Name)
-                        if string.find(rName, "attack") or string.find(rName, "swing") or string.find(rName, "slash") or string.find(rName, "hit") then
-                            pcall(function()
-                                rem:FireServer()
-                            end)
-                        end
+                    if part.CanCollide then
+                        part.CanCollide = false
                     end
                 end
             end
         end
     end
-end
+end)
 
 -- // KHUNG CHỨA 2: PHẦN MEMORY (CHỈ MỞ KHI NHẬP ĐÚNG KEY "monica")
 local MemoryContainer = Instance.new("ScrollingFrame")
@@ -891,7 +801,7 @@ MemoryContainer.BackgroundTransparency = 1
 MemoryContainer.BorderSizePixel = 0
 MemoryContainer.ScrollBarThickness = 4
 MemoryContainer.ScrollBarImageColor3 = Color3.fromRGB(55, 130, 240)
-MemoryContainer.CanvasSize = UDim2.new(0, 0, 0, 340)
+MemoryContainer.CanvasSize = UDim2.new(0, 0, 0, 420)
 MemoryContainer.Visible = false
 MemoryContainer.ZIndex = 7
 MemoryContainer.Parent = ContentArea
@@ -900,7 +810,7 @@ local MemSwitchHeader = Instance.new("TextLabel")
 MemSwitchHeader.Size = UDim2.new(1, -10, 0, 18)
 MemSwitchHeader.Position = UDim2.new(0, 0, 0, 0)
 MemSwitchHeader.BackgroundTransparency = 1
-MemSwitchHeader.Text = "Switch — Memory (Tele 120m, Tốc Chạy & Tốc Bắn/Đánh)"
+MemSwitchHeader.Text = "Switch — Memory (Tele 120m, Tốc Chạy, Fly & Noclip)"
 MemSwitchHeader.TextColor3 = Color3.fromRGB(155, 160, 170)
 MemSwitchHeader.Font = Enum.Font.GothamSemibold
 MemSwitchHeader.TextSize = 12
@@ -940,32 +850,57 @@ MemTargetStatus.TextXAlignment = Enum.TextXAlignment.Left
 MemTargetStatus.ZIndex = 8
 MemTargetStatus.Parent = MemoryContainer
 
--- 2. Công tắc Tăng tốc bắn / đánh cận chiến nhanh nhất có thể
-local FastAttackToggle = CreateCheckbox(
+-- 2. Công tắc Noclip (Xuyên tường)
+local NoclipToggle = CreateCheckbox(
     MemoryContainer,
-    "Tăng tốc bắn / đánh vũ khí tầm gần tối đa (Max Speed)",
+    "Bật Noclip (Đi / Bay xuyên tường)",
     0,
     74,
-    365,
+    355,
     false,
     function(val)
-        Config.Memory.FastAttackEnabled = val
-        if val then
-            LastGCPatchClock = 0
-            PatchWeaponMemoryTables()
-            if LocalPlayer.Character then
-                PatchWeaponInstance(LocalPlayer.Character)
-            end
+        Config.Memory.NoclipEnabled = val
+        if not val then
+            RestoreNoclipCollision()
         end
     end
 )
 
--- 3. Công tắc Tăng tốc độ chạy tùy chỉnh + Thanh kéo Tốc độ chạy
+-- 3. Công tắc Fly (Bay) + Thanh trượt chỉnh tốc độ bay
+local FlyToggle = CreateCheckbox(
+    MemoryContainer,
+    "Bật Fly (Bay tự do theo hướng nhìn Camera)",
+    0,
+    104,
+    355,
+    false,
+    function(val)
+        Config.Memory.FlyEnabled = val
+        if not val then
+            StopFlyMechanics()
+        end
+    end
+)
+
+local FlySpeedSliderGroup = CreateSlider(
+    MemoryContainer,
+    "Tùy chỉnh tốc độ Bay - Fly Speed (10-150)",
+    "",
+    136,
+    10,
+    150,
+    Config.Memory.FlySpeed,
+    function(val)
+        Config.Memory.FlySpeed = val
+    end
+)
+
+-- 4. Công tắc Tăng tốc độ chạy tùy chỉnh + Thanh kéo Tốc độ chạy
 local CustomSpeedToggle = CreateCheckbox(
     MemoryContainer,
     "Bật tăng tốc độ chạy tùy chỉnh (WalkSpeed)",
     0,
-    104,
+    182,
     355,
     false,
     function(val)
@@ -983,7 +918,7 @@ local WalkSpeedSliderGroup = CreateSlider(
     MemoryContainer,
     "Tùy chỉnh tốc độ chạy (16-120)",
     "",
-    136,
+    214,
     16,
     120,
     Config.Memory.WalkSpeed,
@@ -994,7 +929,7 @@ local WalkSpeedSliderGroup = CreateSlider(
 
 local MemDivider = Instance.new("Frame")
 MemDivider.Size = UDim2.new(1, -12, 0, 1)
-MemDivider.Position = UDim2.new(0, 0, 0, 186)
+MemDivider.Position = UDim2.new(0, 0, 0, 264)
 MemDivider.BackgroundColor3 = Color3.fromRGB(45, 48, 55)
 MemDivider.BorderSizePixel = 0
 MemDivider.ZIndex = 8
@@ -1002,7 +937,7 @@ MemDivider.Parent = MemoryContainer
 
 local MemSettingsHeader = Instance.new("TextLabel")
 MemSettingsHeader.Size = UDim2.new(1, -10, 0, 18)
-MemSettingsHeader.Position = UDim2.new(0, 0, 0, 194)
+MemSettingsHeader.Position = UDim2.new(0, 0, 0, 272)
 MemSettingsHeader.BackgroundTransparency = 1
 MemSettingsHeader.Text = "Settings — Cách lựa chọn mục tiêu Tele (120m)"
 MemSettingsHeader.TextColor3 = Color3.fromRGB(155, 160, 170)
@@ -1016,7 +951,7 @@ MemSettingsHeader.Parent = MemoryContainer
 local DropdownBar = Instance.new("TextButton")
 DropdownBar.Name = "TargetPriorityDropdown"
 DropdownBar.Size = UDim2.new(0, 260, 0, 28)
-DropdownBar.Position = UDim2.new(0, 0, 0, 218)
+DropdownBar.Position = UDim2.new(0, 0, 0, 296)
 DropdownBar.BackgroundColor3 = Color3.fromRGB(43, 46, 53)
 DropdownBar.BorderSizePixel = 0
 DropdownBar.Text = ""
@@ -1069,7 +1004,7 @@ ArrowIcon.Parent = DropdownArrowBox
 
 local HelpMark = Instance.new("TextLabel")
 HelpMark.Size = UDim2.new(0, 28, 0, 28)
-HelpMark.Position = UDim2.new(0, 268, 0, 218)
+HelpMark.Position = UDim2.new(0, 268, 0, 296)
 HelpMark.BackgroundTransparency = 1
 HelpMark.Text = "(?)"
 HelpMark.TextColor3 = Color3.fromRGB(145, 150, 160)
@@ -1081,7 +1016,7 @@ HelpMark.Parent = MemoryContainer
 local DropdownListFrame = Instance.new("Frame")
 DropdownListFrame.Name = "DropdownListFrame"
 DropdownListFrame.Size = UDim2.new(0, 260, 0, 58)
-DropdownListFrame.Position = UDim2.new(0, 0, 0, 248)
+DropdownListFrame.Position = UDim2.new(0, 0, 0, 326)
 DropdownListFrame.BackgroundColor3 = Color3.fromRGB(34, 37, 43)
 DropdownListFrame.BorderSizePixel = 0
 DropdownListFrame.Visible = false
@@ -1384,7 +1319,7 @@ FOVStroke.Thickness = 1.5
 FOVStroke.Transparency = 0.15
 FOVStroke.Parent = FOVCircleFrame
 
--- // 5. NHẬN DIỆN ẤN GIỮ NÚT TẤN CÔNG / NÚT BẮN (DÀNH CHO AIMBOT & FAST ATTACK)
+-- // 5. NHẬN DIỆN ẤN GIỮ NÚT TẤN CÔNG / NÚT BẮN (DÀNH CHO AIMBOT)
 local function IsPointOverShootControl(screenPos)
     local pGui = LocalPlayer:FindFirstChild("PlayerGui")
     if pGui then
@@ -1409,7 +1344,6 @@ local function IsPointOverShootControl(screenPos)
         end
     end
 
-    -- Vùng nút viên đạn / dao găm bên phải màn hình trong Killstreak Battle Royale (từ video)
     local vp = Camera.ViewportSize
     local normX = screenPos.X / vp.X
     local normY = screenPos.Y / vp.Y
@@ -1640,7 +1574,7 @@ local function HasClearLineOfSight(targetPart, targetCharacter)
     return false
 end
 
--- // 8. VÒNG LẶP ĐỒNG BỘ: SPEED & FAST ATTACK -> TELE 120M -> AIMBOT -> ESP
+-- // 8. VÒNG LẶP ĐỒNG BỘ: FLY & SPEED -> TELE 120M -> AIMBOT -> ESP
 local frameCount = 0
 local lastFPSTime = os.clock()
 
@@ -1672,25 +1606,20 @@ RunService:BindToRenderStep(RenderStepName, Enum.RenderPriority.Camera.Value + 1
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
 
-    -- BƯỚC 1A: CHỨC NĂNG MEMORY — TĂNG TỐC ĐỘ CHẠY TÙY CHỈNH (WALKSPEED + VELOCITY TRANSLATE)
-    if Config.Memory.Unlocked and Config.Memory.SpeedEnabled and myRoot and myHum and myHum.Health > 0 then
+    -- BƯỚC 1A: CHỨC NĂNG MEMORY — FLY (BAY TÙY CHỈNH TỐC ĐỘ)
+    UpdateFlyMovement(myChar, myRoot, myHum, deltaTime)
+
+    -- BƯỚC 1B: CHỨC NĂNG MEMORY — TĂNG TỐC ĐỘ CHẠY TÙY CHỈNH (KHI KHÔNG BẬT FLY)
+    if Config.Memory.Unlocked and Config.Memory.SpeedEnabled and not Config.Memory.FlyEnabled and myRoot and myHum and myHum.Health > 0 then
         local targetSpeed = Config.Memory.WalkSpeed
         myHum.WalkSpeed = targetSpeed
 
-        -- Bù thêm quãng đường theo hướng di chuyển khi game ép lại WalkSpeed mặc định lúc vung vũ khí / ngắm bắn
         if myHum.MoveDirection.Magnitude > 0.05 and targetSpeed > 16 then
             local extraSpeed = math.max(0, targetSpeed - myHum.WalkSpeed)
             if extraSpeed > 0 then
                 myRoot.CFrame = myRoot.CFrame + (myHum.MoveDirection * extraSpeed * math.clamp(deltaTime, 0.001, 0.05))
             end
         end
-    end
-
-    -- BƯỚC 1B: CHỨC NĂNG MEMORY — TĂNG TỐC BẮN / ĐÁNH VŨ KHÍ TẦM GẦN NHANH NHẤT CÓ THỂ
-    if Config.Memory.Unlocked and Config.Memory.FastAttackEnabled and myChar and myHum and myHum.Health > 0 then
-        PatchWeaponMemoryTables()
-        AccelerateAttackAnimations(myChar, myHum)
-        TriggerRapidWeaponBurst(myChar)
     end
 
     -- BƯỚC 1C: CHỨC NĂNG MEMORY — CHỈ TELE NHANH RA SAU ĐỊCH TRONG PHẠM VI 120M (KHÔNG TỰ BẮN/ĐÁNH)
