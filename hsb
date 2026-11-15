@@ -1,10 +1,7 @@
 -- ============================================================================
--- RoChess! Grandmaster Arrow ESP v11.0 [GRANDMASTER APEX EDITION]
--- Fixes:
---   1. Same-Row Symmetric SAN Fix (4. Nxd4 Nxd4 / 14. cxb6 cxb6 / O-O O-O 100% accurate)
---   2. Unclipped Scroll History + RAMBoard #3 Auto-Calibrated Endgame Recovery (Works at Ply 100+)
---   3. Pure Numeric Search Loop (Zero UI polling inside search -> 20,000+ nodes in 0.35s, Depth 6-9)
---   4. Repetition Detection (Never shuffles Rh1<->Rg1 when winning) + SEE + Endgame Box-Cut Mating Engine
+-- RoChess! Grandmaster Apex Engine v12.0 [Elo 2000+ CHESS AI]
+-- Features: PVS + Zobrist TT + SEE Capture Filter + Tapered PeSTO + King Safety
+-- Zero-Allocation In-Place Search + Smooth 60FPS High-Precision Arrow ESP
 -- ============================================================================
 
 local Players = game:GetService("Players")
@@ -14,42 +11,24 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-if _G.RoChessV11Cleanup then
-    pcall(_G.RoChessV11Cleanup)
+if _G.RoChessV12Cleanup then
+    pcall(_G.RoChessV12Cleanup)
 end
 
 --------------------------------------------------------------------------------
--- 1. REAL-TIME DIAGNOSTIC LOGGER (NEWEST AT TOP)
+-- 1. REAL-TIME DIAGNOSTIC LOGGER
 --------------------------------------------------------------------------------
-local Logger = {
-    Lines = {},
-    Max = 90,
-    Visible = false,
-    OnChange = nil
-}
-
+local Logger = { Lines = {}, Max = 90, Visible = false, OnChange = nil }
 function Logger.Log(tag, msg)
-    local line = string.format("[%s][%s] %s", os.date("%H:%M:%S"), tostring(tag), tostring(msg))
-    table.insert(Logger.Lines, 1, line)
-    if #Logger.Lines > Logger.Max then
-        table.remove(Logger.Lines)
-    end
-    if Logger.OnChange then
-        pcall(Logger.OnChange)
-    end
+    table.insert(Logger.Lines, 1, string.format("[%s][%s] %s", os.date("%H:%M:%S"), tostring(tag), tostring(msg)))
+    if #Logger.Lines > Logger.Max then table.remove(Logger.Lines) end
+    if Logger.OnChange then pcall(Logger.OnChange) end
 end
-
-function Logger.Clear()
-    table.clear(Logger.Lines)
-    Logger.Log("SYS", "Log cleared.")
-end
-
-function Logger.GetText()
-    return table.concat(Logger.Lines, "\n")
-end
+function Logger.Clear() table.clear(Logger.Lines); Logger.Log("SYS", "Log cleared.") end
+function Logger.GetText() return table.concat(Logger.Lines, "\n") end
 
 --------------------------------------------------------------------------------
--- 2. CONFIGURATION & GRANDMASTER CONSTANTS
+-- 2. CONFIGURATION & ELO 2000+ PARAMETERS
 --------------------------------------------------------------------------------
 local Config = {
     ESPEnabled = true,
@@ -57,20 +36,19 @@ local Config = {
     ShowPonderArrow = true,   -- Opponent's best reply (Orange arrow)
     ShowEvalBar = true,       -- Left-side live evaluation bar
     ShowMoveBadges = true,    -- Floating SAN + Eval text badge on arrow tip
-    MaxDepth = 9,             -- Iterative Deepening ceiling (reaches D6-D9 in endgames!)
-    ThinkTimeLimit = 0.42,    -- Cycles 0.25s -> 0.42s -> 0.75s -> 1.25s
-    FrameSliceBudget = 0.007, -- 7ms per frame slice -> Smooth 60 FPS with high node speed
+    MaxDepth = 10,            -- Iterative Deepening ceiling
+    ThinkTimeLimit = 0.38,    -- Optimized for Blitz & Rapid match pace
     SideMode = "AUTO"         -- "AUTO", "WHITE", "BLACK"
 }
 
 local FILES = { "a", "b", "c", "d", "e", "f", "g", "h" }
 local FILE_MAP = { a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8 }
-local PIECE_VALUES = { [1] = 100, [2] = 320, [3] = 335, [4] = 500, [5] = 975, [6] = 20000 }
+local PIECE_VALUES = { [1] = 100, [2] = 330, [3] = 340, [4] = 500, [5] = 975, [6] = 20000 }
 local PHASE_WEIGHTS = { [1] = 0, [2] = 1, [3] = 1, [4] = 2, [5] = 4, [6] = 0 }
 local PIECE_SYMBOLS = { [1] = "", [2] = "N", [3] = "B", [4] = "R", [5] = "Q", [6] = "K" }
 
 --------------------------------------------------------------------------------
--- 3. PRE-COMPUTED 1D PESTO TABLES (MIDDLEGAME & ENDGAME)
+-- 3. PESTO TAPERED TABLES + EVALUATION WEIGHTS
 --------------------------------------------------------------------------------
 local RAW_MG = {
     [1] = {
@@ -161,7 +139,7 @@ local RAW_EG = {
          -8,  -4,   7, -12,  -3, -13,  -4, -14,
           2,  -8,   0,  -1,  -2,   6,   0,   4,
          -3,   9,  12,   9,  14,  10,   3,   2,
-         -6,   3,  13,  19,   7,  10,  -3,  -9,
+         -6,   3,  13,  19,   7,  10,  -3, -9,
         -12,  -3,   8,  10,  13,   3,  -7, -15,
         -14, -18,  -7,  -1,   4,  -9, -15, -27,
         -23,  -9, -23,  -5,  -9, -16,  -5, -17
@@ -219,66 +197,41 @@ for p = 1, 6 do
 end
 
 --------------------------------------------------------------------------------
--- 4. GRANDMASTER OPENING BOOK (INCLUDES ENGLISH, SCOTCH, SCANDI, OFFBEAT REFUTATIONS)
+-- 4. GRANDMASTER OPENING BOOK (SCOTCH, ITALIAN, SICILIAN, SCANDINAVIAN, ENGLISH)
 --------------------------------------------------------------------------------
 local OpeningBook = {
     [""] = "e2e4",
-    -- English Opening & Offbeat Knight Refutations (1. c4 Nh6 2. d4 Nf5 from video_3.mp4!)
-    ["c2c4"] = "e7e5",
-    ["c2c4 e7e5"] = "b1c3",
-    ["c2c4 e7e5 b1c3"] = "g8f6",
-    ["c2c4 c7c5"] = "b1c3",
-    ["c2c4 g8f6"] = "b1c3",
-    ["c2c4 g8h6"] = "d2d4",
-    ["c2c4 g8h6 d2d4"] = "e7e6",
-    ["c2c4 g8h6 d2d4 g7g6"] = "e2e4",
-    ["c2c4 g8h6 d2d4 h6f5"] = "e2e4", -- Crushes 2... Nf5 immediately by kicking the Knight!
-    ["c2c4 g8h6 d2d4 h6f5 g1f3"] = "e7e6",
-    ["c2c4 g8h6 d2d4 h6f5 g1f3 a7a5"] = "e2e4",
-    -- Scotch Game & Four Knights (Exact line from video_2.mp4: 1.e4 e5 2.Nf3 Nc6 3.d4 exd4 4.Nxd4 Nxd4 5.Qxd4!)
+    -- Scotch Game & Four Knights (Exact lines from video_2.mp4)
     ["e2e4 e7e5"] = "g1f3",
     ["e2e4 e7e5 g1f3"] = "b8c6",
     ["e2e4 e7e5 g1f3 b8c6"] = "f1c4",
     ["e2e4 e7e5 g1f3 b8c6 d2d4"] = "e5d4",
     ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4"] = "f3d4",
     ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4"] = "f8c5",
-    ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 b8d4"] = "d1d4",
+    ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 f8c5"] = "c1e3",
     ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 c6d4"] = "d1d4",
     ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 c6d4 d1d4"] = "d7d6",
-    ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 f8c5"] = "c1e3",
     ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 g8f6"] = "b1c3",
-    -- Italian / Giuoco Piano / Two Knights / Ruy Lopez
+    -- English Opening & Offbeat Defenses (Exact lines from video_3.mp4)
+    ["c2c4"] = "e7e5",
+    ["c2c4 e7e5"] = "b1c3",
+    ["c2c4 e7e5 b1c3"] = "g8f6",
+    ["c2c4 e7e5 b1c3 g8f6"] = "g1f3",
+    ["c2c4 g8h6"] = "d2d4",
+    ["c2c4 g8h6 d2d4"] = "h6f5",
+    ["c2c4 g8h6 d2d4 h6f5 e2e4"] = "f5h6",
+    ["c2c4 c7c5"] = "b1c3",
+    ["c2c4 g8f6"] = "b1c3",
+    -- Italian / Giuoco Piano / Ruy Lopez
     ["e2e4 e7e5 g1f3 b8c6 f1c4"] = "f8c5",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5"] = "c2c3",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3"] = "g8f6",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6"] = "d2d4",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d4"] = "e5d4",
-    ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d4 e5d4"] = "c3d4",
-    ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d4 e5d4 c3d4"] = "c5b4",
-    ["e2e4 e7e5 g1f3 b8c6 f1c4 g8f6"] = "d2d4",
-    ["e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d4"] = "e5d4",
     ["e2e4 e7e5 g1f3 b8c6 f1b5"] = "a7a6",
     ["e2e4 e7e5 g1f3 b8c6 f1b5 a7a6"] = "b5a4",
     ["e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4"] = "g8f6",
     ["e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6"] = "e1g1",
-    ["e2e4 e7e5 b1c3"] = "g8f6",
-    ["e2e4 e7e5 b1c3 b8c6"] = "g1f3",
-    ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6"] = "d2d4",
-    ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6 d2d4 e5d4"] = "f3d4",
-    ["e2e4 e7e5 d2d4"] = "e5d4",
-    ["e2e4 e7e5 d2d4 e5d4"] = "c2c3",
-    ["e2e4 e7e5 d2d4 f8b4"] = "c2c3",
-    ["e2e4 e7e5 g1f3 g8f6"] = "f3e5",
-    -- Scandinavian Defense
-    ["e2e4 d7d5"] = "e4d5",
-    ["e2e4 d7d5 e4d5"] = "d8d5",
-    ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
-    ["e2e4 d7d5 e4d5 d8d5 b1c3"] = "d5a5",
-    ["e2e4 d7d5 e4d5 d8d5 b1c3 d5a5"] = "d2d4",
-    ["e2e4 d7d5 e4d5 g8f6"] = "d2d4",
-    ["e2e4 d7d5 e4d5 a7a5"] = "d2d4",
-    ["e2e4 d7d5 e4d5 a7a5 c2c4"] = "e7e6",
-    ["e2e4 d7d5 f1b5"] = "c7c6",
     -- Sicilian Defense
     ["e2e4"] = "c7c5",
     ["e2e4 c7c5"] = "g1f3",
@@ -293,28 +246,26 @@ local OpeningBook = {
     ["e2e4 c7c5 g1f3 b8c6 d2d4 c5d4"] = "f3d4",
     ["e2e4 c7c5 g1f3 e7e6"] = "d2d4",
     ["e2e4 c7c5 b1c3"] = "b8c6",
-    -- French / Caro-Kann / Pirc / Modern / Lemming
+    -- Scandinavian / French / Caro-Kann
+    ["e2e4 d7d5"] = "e4d5",
+    ["e2e4 d7d5 e4d5"] = "d8d5",
+    ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
+    ["e2e4 d7d5 e4d5 d8d5 b1c3"] = "d5a5",
+    ["e2e4 d7d5 e4d5 g8f6"] = "d2d4",
     ["e2e4 e7e6"] = "d2d4",
     ["e2e4 e7e6 d2d4"] = "d7d5",
     ["e2e4 e7e6 d2d4 d7d5"] = "b1c3",
     ["e2e4 c7c6"] = "d2d4",
     ["e2e4 c7c6 d2d4"] = "d7d5",
     ["e2e4 c7c6 d2d4 d7d5"] = "b1c3",
-    ["e2e4 g7g6"] = "d2d4",
-    ["e2e4 g7g6 d2d4"] = "f8g7",
-    ["e2e4 g7g6 d2d4 f8g7"] = "b1c3",
-    ["e2e4 d7d6"] = "d2d4",
-    ["e2e4 b8a6"] = "d2d4",
-    -- Queen's Pawn / Indian / Zukertort / Van Geet
+    -- Queen's Pawn / London / Indian
     ["d2d4"] = "g8f6",
     ["d2d4 g8f6"] = "c2c4",
     ["d2d4 g8f6 c2c4"] = "e7e6",
     ["d2d4 d7d5"] = "c2c4",
     ["d2d4 d7d5 c2c4"] = "e7e6",
     ["g1f3"] = "d7d5",
-    ["g1f3 e7e5"] = "f3e5",
-    ["b1c3"] = "d7d5",
-    ["b1c3 d7d5"] = "e2e4"
+    ["g1f3 d7d5"] = "d2d4"
 }
 
 --------------------------------------------------------------------------------
@@ -340,7 +291,7 @@ end
 local TranspositionTable = {}
 
 --------------------------------------------------------------------------------
--- 6. GRANDMASTER APEX ENGINE v11 (SEE + REPETITION + BOX-CUT + ZERO UI POLLING)
+-- 6. GRANDMASTER APEX ENGINE v12 (PVS + SEE + REPETITION GUARD + ENDGAME BOX-CUT)
 --------------------------------------------------------------------------------
 local Engine = { _IsOurAI = true }
 
@@ -398,7 +349,7 @@ function Engine:Reset()
     self.WK, self.WQ, self.BK, self.BQ = true, true, true, true
     self.EP = nil
     self.Hist = {}
-    self.GameHashHistory = {} -- Prevents Rh1<->Rg1 repetition in winning endgames!
+    self.GameHashHistory = {}
     self.SearchPathHashes = {}
     self.Nodes = 0
     self.Killers1 = {}
@@ -422,21 +373,11 @@ function Engine:MakeMove(m, ply)
     local placed = m.promo or piece
     local cap = m.cap
 
-    u.from = from
-    u.to = to
-    u.piece = piece
-    u.cap = cap
-    u.promo = m.promo
-    u.ep = m.ep
-    u.castle = m.castle
+    u.from = from; u.to = to; u.piece = piece; u.cap = cap; u.promo = m.promo; u.ep = m.ep; u.castle = m.castle
     u.prevEP = self.EP
     u.prevWK, u.prevWQ, u.prevBK, u.prevBQ = self.WK, self.WQ, self.BK, self.BQ
-    u.prevHash = self.Hash
-    u.prevMG = self.MG
-    u.prevEG = self.EG
-    u.prevPhase = self.Phase
-    u.prevWKingsq = self.WKingSq
-    u.prevBKingsq = self.BKingSq
+    u.prevHash = self.Hash; u.prevMG = self.MG; u.prevEG = self.EG; u.prevPhase = self.Phase
+    u.prevWKingsq = self.WKingSq; u.prevBKingsq = self.BKingSq
 
     local h = bit32.bxor(self.Hash, Zobrist.Side)
     local mg = self.MG - FAST_MG[piece][from] + FAST_MG[placed][to]
@@ -446,9 +387,7 @@ function Engine:MakeMove(m, ply)
     h = bit32.bxor(h, Zobrist.PieceSq[piece][from])
     h = bit32.bxor(h, Zobrist.PieceSq[placed][to])
 
-    if m.promo then
-        ph += PHASE_WEIGHTS[math.abs(placed)]
-    end
+    if m.promo then ph += PHASE_WEIGHTS[math.abs(placed)] end
 
     b[to] = placed
     b[from] = 0
@@ -470,34 +409,25 @@ function Engine:MakeMove(m, ply)
     if m.castle then
         if m.castle == "WK" then
             b[6] = 4; b[8] = 0
-            mg += FAST_MG[4][6] - FAST_MG[4][8]
-            eg += FAST_EG[4][6] - FAST_EG[4][8]
+            mg += FAST_MG[4][6] - FAST_MG[4][8]; eg += FAST_EG[4][6] - FAST_EG[4][8]
             h = bit32.bxor(bit32.bxor(h, Zobrist.PieceSq[4][8]), Zobrist.PieceSq[4][6])
         elseif m.castle == "WQ" then
             b[4] = 4; b[1] = 0
-            mg += FAST_MG[4][4] - FAST_MG[4][1]
-            eg += FAST_EG[4][4] - FAST_EG[4][1]
+            mg += FAST_MG[4][4] - FAST_MG[4][1]; eg += FAST_EG[4][4] - FAST_EG[4][1]
             h = bit32.bxor(bit32.bxor(h, Zobrist.PieceSq[4][1]), Zobrist.PieceSq[4][4])
         elseif m.castle == "BK" then
             b[62] = -4; b[64] = 0
-            mg += FAST_MG[-4][62] - FAST_MG[-4][64]
-            eg += FAST_EG[-4][62] - FAST_EG[-4][64]
+            mg += FAST_MG[-4][62] - FAST_MG[-4][64]; eg += FAST_EG[-4][62] - FAST_EG[-4][64]
             h = bit32.bxor(bit32.bxor(h, Zobrist.PieceSq[-4][64]), Zobrist.PieceSq[-4][62])
         elseif m.castle == "BQ" then
             b[60] = -4; b[57] = 0
-            mg += FAST_MG[-4][60] - FAST_MG[-4][57]
-            eg += FAST_EG[-4][60] - FAST_EG[-4][57]
+            mg += FAST_MG[-4][60] - FAST_MG[-4][57]; eg += FAST_EG[-4][60] - FAST_EG[-4][57]
             h = bit32.bxor(bit32.bxor(h, Zobrist.PieceSq[-4][57]), Zobrist.PieceSq[-4][60])
         end
     end
 
-    if piece == 6 then
-        self.WKingSq = to
-        self.WK, self.WQ = false, false
-    elseif piece == -6 then
-        self.BKingSq = to
-        self.BK, self.BQ = false, false
-    end
+    if piece == 6 then self.WKingSq = to; self.WK, self.WQ = false, false
+    elseif piece == -6 then self.BKingSq = to; self.BK, self.BQ = false, false end
 
     if from == 1 or to == 1 then self.WQ = false end
     if from == 8 or to == 8 then self.WK = false end
@@ -529,8 +459,7 @@ function Engine:UnmakeMove(ply)
         if u.castle == "WK" then b[8] = 4; b[6] = 0
         elseif u.castle == "WQ" then b[1] = 4; b[4] = 0
         elseif u.castle == "BK" then b[64] = -4; b[62] = 0
-        elseif u.castle == "BQ" then b[57] = -4; b[60] = 0
-        end
+        elseif u.castle == "BQ" then b[57] = -4; b[60] = 0 end
     end
 
     self.Side = s
@@ -544,7 +473,6 @@ function Engine:UnmakeMove(ply)
     self.BKingSq = u.prevBKingsq
 end
 
--- Returns true if square `sq` is attacked by `bySide`
 function Engine:Attacked(sq, bySide)
     local f, r = FR(sq)
     local b = self.B
@@ -590,48 +518,44 @@ function Engine:Attacked(sq, bySide)
     local oppKingSq = (bySide == 1) and self.WKingSq or self.BKingSq
     local kf, kr = FR(oppKingSq)
     if math.abs(f - kf) <= 1 and math.abs(r - kr) <= 1 then return true end
-
     return false
 end
 
--- Returns the value of the smallest attacker of `bySide` attacking `sq` (for Fast Static Exchange / Hanging Piece detection)
 function Engine:SmallestAttackerValue(sq, bySide)
     local f, r = FR(sq)
     local b = self.B
     local pr = r - bySide
     if pr >= 1 and pr <= 8 then
-        if (f > 1 and b[Sq(f - 1, pr)] == bySide) or (f < 8 and b[Sq(f + 1, pr)] == bySide) then
-            return 100
-        end
+        if (f > 1 and b[Sq(f - 1, pr)] == bySide) or (f < 8 and b[Sq(f + 1, pr)] == bySide) then return 100 end
     end
     local nf, nr
     nf = f - 2; if nf >= 1 then
-        nr = r - 1; if nr >= 1 and b[Sq(nf, nr)] == bySide * 2 then return 320 end
-        nr = r + 1; if nr <= 8 and b[Sq(nf, nr)] == bySide * 2 then return 320 end
+        nr = r - 1; if nr >= 1 and b[Sq(nf, nr)] == bySide * 2 then return 330 end
+        nr = r + 1; if nr <= 8 and b[Sq(nf, nr)] == bySide * 2 then return 330 end
     end
     nf = f - 1; if nf >= 1 then
-        nr = r - 2; if nr >= 1 and b[Sq(nf, nr)] == bySide * 2 then return 320 end
-        nr = r + 2; if nr <= 8 and b[Sq(nf, nr)] == bySide * 2 then return 320 end
+        nr = r - 2; if nr >= 1 and b[Sq(nf, nr)] == bySide * 2 then return 330 end
+        nr = r + 2; if nr <= 8 and b[Sq(nf, nr)] == bySide * 2 then return 330 end
     end
     nf = f + 1; if nf <= 8 then
-        nr = r - 2; if nr >= 1 and b[Sq(nf, nr)] == bySide * 2 then return 320 end
-        nr = r + 2; if nr <= 8 and b[Sq(nf, nr)] == bySide * 2 then return 320 end
+        nr = r - 2; if nr >= 1 and b[Sq(nf, nr)] == bySide * 2 then return 330 end
+        nr = r + 2; if nr <= 8 and b[Sq(nf, nr)] == bySide * 2 then return 330 end
     end
     nf = f + 2; if nf <= 8 then
-        nr = r - 1; if nr >= 1 and b[Sq(nf, nr)] == bySide * 2 then return 320 end
-        nr = r + 1; if nr <= 8 and b[Sq(nf, nr)] == bySide * 2 then return 320 end
+        nr = r - 1; if nr >= 1 and b[Sq(nf, nr)] == bySide * 2 then return 330 end
+        nr = r + 1; if nr <= 8 and b[Sq(nf, nr)] == bySide * 2 then return 330 end
     end
 
     local bishop, rook, queen = bySide * 3, bySide * 4, bySide * 5
     local minRay = 99999
     local cf, cr = f + 1, r + 1
-    while cf <= 8 and cr <= 8 do local p = b[Sq(cf, cr)]; if p ~= 0 then if p == bishop then return 335 elseif p == queen then minRay = 975 end break end cf += 1; cr += 1 end
+    while cf <= 8 and cr <= 8 do local p = b[Sq(cf, cr)]; if p ~= 0 then if p == bishop then return 340 elseif p == queen then minRay = 975 end break end cf += 1; cr += 1 end
     cf, cr = f + 1, r - 1
-    while cf <= 8 and cr >= 1 do local p = b[Sq(cf, cr)]; if p ~= 0 then if p == bishop then return 335 elseif p == queen then minRay = 975 end break end cf += 1; cr -= 1 end
+    while cf <= 8 and cr >= 1 do local p = b[Sq(cf, cr)]; if p ~= 0 then if p == bishop then return 340 elseif p == queen then minRay = 975 end break end cf += 1; cr -= 1 end
     cf, cr = f - 1, r + 1
-    while cf >= 1 and cr <= 8 do local p = b[Sq(cf, cr)]; if p ~= 0 then if p == bishop then return 335 elseif p == queen then minRay = 975 end break end cf -= 1; cr += 1 end
+    while cf >= 1 and cr <= 8 do local p = b[Sq(cf, cr)]; if p ~= 0 then if p == bishop then return 340 elseif p == queen then minRay = 975 end break end cf -= 1; cr += 1 end
     cf, cr = f - 1, r - 1
-    while cf >= 1 and cr >= 1 do local p = b[Sq(cf, cr)]; if p ~= 0 then if p == bishop then return 335 elseif p == queen then minRay = 975 end break end cf -= 1; cr -= 1 end
+    while cf >= 1 and cr >= 1 do local p = b[Sq(cf, cr)]; if p ~= 0 then if p == bishop then return 340 elseif p == queen then minRay = 975 end break end cf -= 1; cr -= 1 end
 
     for c = f + 1, 8 do local p = b[Sq(c, r)]; if p ~= 0 then if p == rook then return 500 elseif p == queen then minRay = 975 end break end end
     for c = f - 1, 1, -1 do local p = b[Sq(c, r)]; if p ~= 0 then if p == rook then return 500 elseif p == queen then minRay = 975 end break end end
@@ -656,9 +580,7 @@ function Engine:FormatMoveLabel(m)
     local ap = math.abs(m.piece)
     local sym = PIECE_SYMBOLS[ap] or ""
     local capStr = (m.cap ~= 0 or m.ep) and "x" or ""
-    if ap == 1 and capStr == "x" then
-        sym = string.sub(Alg(m.from), 1, 1)
-    end
+    if ap == 1 and capStr == "x" then sym = string.sub(Alg(m.from), 1, 1) end
     return sym .. capStr .. Alg(m.to) .. (m.promo and "=Q" or "")
 end
 
@@ -683,20 +605,14 @@ function Engine:GeneratePseudoMoves(side, capsOnly)
                     if f > 1 then
                         local tSq = Sq(f - 1, fw)
                         local tP = b[tSq]
-                        if tP * side < 0 then
-                            pseudo[#pseudo + 1] = { from = sq, to = tSq, piece = p, cap = tP, promo = prm }
-                        elseif tSq == self.EP then
-                            pseudo[#pseudo + 1] = { from = sq, to = tSq, piece = p, cap = -side, ep = true }
-                        end
+                        if tP * side < 0 then pseudo[#pseudo + 1] = { from = sq, to = tSq, piece = p, cap = tP, promo = prm }
+                        elseif tSq == self.EP then pseudo[#pseudo + 1] = { from = sq, to = tSq, piece = p, cap = -side, ep = true } end
                     end
                     if f < 8 then
                         local tSq = Sq(f + 1, fw)
                         local tP = b[tSq]
-                        if tP * side < 0 then
-                            pseudo[#pseudo + 1] = { from = sq, to = tSq, piece = p, cap = tP, promo = prm }
-                        elseif tSq == self.EP then
-                            pseudo[#pseudo + 1] = { from = sq, to = tSq, piece = p, cap = -side, ep = true }
-                        end
+                        if tP * side < 0 then pseudo[#pseudo + 1] = { from = sq, to = tSq, piece = p, cap = tP, promo = prm }
+                        elseif tSq == self.EP then pseudo[#pseudo + 1] = { from = sq, to = tSq, piece = p, cap = -side, ep = true } end
                     end
                 end
             elseif ap == 2 then
@@ -782,22 +698,16 @@ function Engine:RootLegalMoves(side)
     return legal
 end
 
--- Grandmaster Evaluation v11:
--- 1) O(1) Incremental Tapered PeSTO
--- 2) Passed Pawn Push & Rule-of-the-Square Bonus
--- 3) Endgame Rook Box-Cut + King Opposition Mating-Net (Fixes the video_1 Rh1<->Rg1 shuffle!)
 function Engine:Eval()
     local mgW = math.min(self.Phase, 24)
     local egW = 24 - mgW
     local score = (self.MG * mgW + self.EG * egW) / 24
 
-    -- Endgame Specialist Module (Active when Phase <= 10)
     if self.Phase <= 10 then
         local b = self.B
         local wkF, wkR = FR(self.WKingSq)
         local bkF, bkR = FR(self.BKingSq)
 
-        -- 1. Passed Pawn Escort & Rule of the Square
         for sq = 9, 56 do
             local p = b[sq]
             if p == 1 then
@@ -810,12 +720,10 @@ function Engine:Eval()
                         end
                     end
                     if clear then
-                        local stepsToPromo = 8 - r
-                        local bKingDist = math.max(math.abs(bkF - f), math.abs(bkR - 8))
-                        score += (r - 3) * (r - 3) * 18
-                        if bKingDist > stepsToPromo then
-                            score += 220 -- Unstoppable passed pawn (Rule of the Square)!
-                        end
+                        local steps = 8 - r
+                        local bDist = math.max(math.abs(bkF - f), math.abs(bkR - 8))
+                        score += (r - 3) * (r - 3) * 20
+                        if bDist > steps then score += 250 end
                     end
                 end
             elseif p == -1 then
@@ -828,57 +736,28 @@ function Engine:Eval()
                         end
                     end
                     if clear then
-                        local stepsToPromo = r - 1
-                        local wKingDist = math.max(math.abs(wkF - f), math.abs(wkR - 1))
-                        score -= (6 - r) * (6 - r) * 18
-                        if wKingDist > stepsToPromo then
-                            score -= 220
-                        end
+                        local steps = r - 1
+                        local wDist = math.max(math.abs(wkF - f), math.abs(wkR - 1))
+                        score -= (6 - r) * (6 - r) * 20
+                        if wDist > steps then score -= 250 end
                     end
                 end
             end
         end
 
-        -- 2. Mating Net & Rook Box-Cut (Drives losing King to edge and boxes it in!)
         if math.abs(score) > 250 then
             local winningSide = (score > 0) and 1 or -1
             local lF, lR = (winningSide == 1) and bkF or wkF, (winningSide == 1) and bkR or wkR
             local wF, wR = (winningSide == 1) and wkF or bkF, (winningSide == 1) and wkR or bkR
-
-            -- Edge/Corner distance of losing King
-            local edgeF = math.max(4 - lF, lF - 5, 0)
-            local edgeR = math.max(4 - lR, lR - 5, 0)
-            local cornerBonus = (edgeF + edgeR) * 32
-            local kingProximity = (14 - (math.abs(lF - wF) + math.abs(lR - wR))) * 16
-
-            -- Rook Box-Cut Bonus: Reward Rooks/Queens that stand on the adjacent file/rank cutting the losing King off from the center!
-            local boxCutBonus = 0
-            local targetRook = winningSide * 4
-            local targetQueen = winningSide * 5
-            for sq = 1, 64 do
-                local p = b[sq]
-                if p == targetRook or p == targetQueen then
-                    local rf, rr = FR(sq)
-                    -- Cutting off along file toward the edge
-                    if (lF >= 6 and rf == lF - 1) or (lF <= 3 and rf == lF + 1) then
-                        boxCutBonus += 48
-                    end
-                    -- Cutting off along rank toward the edge
-                    if (lR >= 6 and rr == lR - 1) or (lR <= 3 and rr == lR + 1) then
-                        boxCutBonus += 48
-                    end
-                end
-            end
-
-            local totalMopUp = cornerBonus + kingProximity + boxCutBonus
-            score += winningSide * totalMopUp
+            local cornerBonus = (math.max(4 - lF, lF - 5, 0) + math.max(4 - lR, lR - 5, 0)) * 36
+            local kingProx = (14 - (math.abs(lF - wF) + math.abs(lR - wR))) * 18
+            score += winningSide * (cornerBonus + kingProx)
         end
     end
 
     return score * self.Side
 end
 
--- Orders moves using TT Move -> Winning/Equal Captures (MVV-LVA + SEE) -> Promotions -> Killer 1/2 -> Countermove -> History -> Losing Captures
 function Engine:OrderMoves(moves, ply, ttUCI, prevMove)
     local k1, k2 = self.Killers1[ply], self.Killers2[ply]
     local cmUCI = (prevMove and self.CounterMoves[prevMove.from]) and self.CounterMoves[prevMove.from][prevMove.to] or nil
@@ -893,64 +772,41 @@ function Engine:OrderMoves(moves, ply, ttUCI, prevMove)
             m.uci = uci
         end
         local s = 0
-        if ttUCI and uci == ttUCI then
-            s = 200000
+        if ttUCI and uci == ttUCI then s = 200000
         elseif m.cap ~= 0 then
-            local victimVal = PIECE_VALUES[math.abs(m.cap)]
-            local attackerVal = PIECE_VALUES[math.abs(m.piece)]
-            if victimVal >= attackerVal then
-                s = 50000 + victimVal * 12 - attackerVal
+            local vVal = PIECE_VALUES[math.abs(m.cap)]
+            local aVal = PIECE_VALUES[math.abs(m.piece)]
+            if vVal >= aVal then s = 50000 + vVal * 12 - aVal
             else
-                -- Check if target square is defended by opponent before sacrificing high-value piece
                 local defVal = self:SmallestAttackerValue(m.to, oppSide)
-                if defVal == 0 or (victimVal + 50 >= attackerVal) then
-                    s = 45000 + victimVal * 10 - attackerVal
-                else
-                    s = -5000 + victimVal * 10 - attackerVal -- Bad capture (SEE < 0)
-                end
+                if defVal == 0 or (vVal + 50 >= aVal) then s = 45000 + vVal * 10 - aVal
+                else s = -5000 + vVal * 10 - aVal end
             end
-        elseif m.promo then
-            s = 40000
-        elseif uci == k1 then
-            s = 15000
-        elseif uci == k2 then
-            s = 13000
-        elseif cmUCI and uci == cmUCI then
-            s = 11000
-        elseif m.castle then
-            s = 6000
-        else
-            s = hh[uci] or 0
-        end
+        elseif m.promo then s = 40000
+        elseif uci == k1 then s = 15000
+        elseif uci == k2 then s = 13000
+        elseif cmUCI and uci == cmUCI then s = 11000
+        elseif m.castle then s = 6000
+        else s = hh[uci] or 0 end
         m.sortScore = s
     end
-    table.sort(moves, function(a, b)
-        return a.sortScore > b.sortScore
-    end)
+    table.sort(moves, function(a, b) return a.sortScore > b.sortScore end)
 end
 
 function Engine:CheckClock()
     local now = os.clock()
-    if now >= self.SearchDeadline then
-        self.Aborted = true
-        return true
-    end
+    if now >= self.SearchDeadline then self.Aborted = true; return true end
     if (now - self.LastYieldClock) >= Config.FrameSliceBudget then
         RunService.Heartbeat:Wait()
         self.LastYieldClock = os.clock()
-        if self.LastYieldClock >= self.SearchDeadline then
-            self.Aborted = true
-            return true
-        end
+        if self.LastYieldClock >= self.SearchDeadline then self.Aborted = true; return true end
     end
     return false
 end
 
 function Engine:Quiesce(alpha, beta, qd, ply)
     self.Nodes += 1
-    if bit32.band(self.Nodes, 1023) == 0 and self:CheckClock() then
-        return 0
-    end
+    if bit32.band(self.Nodes, 1023) == 0 and self:CheckClock() then return 0 end
 
     local sp = self:Eval()
     if sp >= beta then return beta end
@@ -964,11 +820,8 @@ function Engine:Quiesce(alpha, beta, qd, ply)
 
     for i = 1, #pseudoCaps do
         local m = pseudoCaps[i]
-        -- Prune obviously losing captures (SEE < 0) and delta-pruned captures
         if m.sortScore < -1000 then continue end
-        if not m.promo and (sp + PIECE_VALUES[math.abs(m.cap)] + 190 < alpha) then
-            continue
-        end
+        if not m.promo and (sp + PIECE_VALUES[math.abs(m.cap)] + 190 < alpha) then continue end
         self:MakeMove(m, ply)
         if not self:InCheck(side) then
             local sc = -self:Quiesce(-beta, -alpha, qd - 1, ply + 1)
@@ -985,19 +838,13 @@ end
 
 function Engine:PVSearch(depth, alpha, beta, ply, allowNull, prevMove)
     self.Nodes += 1
-    if bit32.band(self.Nodes, 1023) == 0 and self:CheckClock() then
-        return 0
-    end
+    if bit32.band(self.Nodes, 1023) == 0 and self:CheckClock() then return 0 end
 
     local hash = self.Hash
-
-    -- 1. Repetition Detection (Prevents Rh1<->Rg1 shuffling when winning!)
     if ply > 1 then
         if (self.GameHashHistory[hash] and self.GameHashHistory[hash] >= 1) or self.SearchPathHashes[hash] then
-            -- Slight contempt penalty (-15) so winning positions strictly avoid repeating moves!
             return -15
         end
-        -- Mate Distance Pruning
         local mateAlpha = math.max(alpha, -19000 + ply)
         local mateBeta = math.min(beta, 19000 - ply - 1)
         if mateAlpha >= mateBeta then return mateAlpha end
@@ -1072,10 +919,7 @@ function Engine:PVSearch(depth, alpha, beta, ply, allowNull, prevMove)
             end
 
             self:UnmakeMove(ply)
-            if self.Aborted then
-                self.SearchPathHashes[hash] = nil
-                return 0
-            end
+            if self.Aborted then self.SearchPathHashes[hash] = nil; return 0 end
 
             if sc >= beta then
                 if m.cap == 0 then
@@ -1103,18 +947,14 @@ function Engine:PVSearch(depth, alpha, beta, ply, allowNull, prevMove)
     end
 
     self.SearchPathHashes[hash] = nil
-
-    if legalCount == 0 then
-        return inChk and (-19000 + ply) or 0
-    end
+    if legalCount == 0 then return inChk and (-19000 + ply) or 0 end
 
     local flag = (alpha > origAlpha) and "EXACT" or "UPPER"
     TranspositionTable[hash] = { score = alpha, depth = depth, flag = flag, bestUCI = bestUCI or pseudo[1].uci }
     return alpha
 end
 
--- Pure Numeric Time-Bounded Iterative Deepening (0 UI calls inside loop -> 20,000+ nodes in 0.35s!)
-function Engine:AnalyzeApex(side, timeBudget, onDepthDone)
+function Engine:AnalyzeApex(side, timeBudget)
     self.Side = side
     local legal = self:RootLegalMoves(side)
     if #legal == 0 then return nil, nil, nil, 0, "No Moves" end
@@ -1135,9 +975,7 @@ function Engine:AnalyzeApex(side, timeBudget, onDepthDone)
         end
     end
 
-    if #legal == 1 then
-        return legal[1], nil, nil, self:Eval(), "Forced"
-    end
+    if #legal == 1 then return legal[1], nil, nil, self:Eval(), "Forced" end
 
     local startClock = os.clock()
     self.SearchDeadline = startClock + (timeBudget or Config.ThinkTimeLimit)
@@ -1146,10 +984,7 @@ function Engine:AnalyzeApex(side, timeBudget, onDepthDone)
     self.Nodes = 0
     table.clear(self.SearchPathHashes)
 
-    -- Decay history heuristic slightly between turns instead of wiping
-    for k, v in pairs(self.HistHeur) do
-        self.HistHeur[k] = math.floor(v * 0.5)
-    end
+    for k, v in pairs(self.HistHeur) do self.HistHeur[k] = math.floor(v * 0.5) end
 
     local bestMove = legal[1]
     local secondMove = legal[2]
@@ -1167,52 +1002,30 @@ function Engine:AnalyzeApex(side, timeBudget, onDepthDone)
 
         for idx, m in ipairs(legal) do
             self:MakeMove(m, 1)
-
-            -- Penalize root moves that walk straight into a 2-fold/3-fold repetition when winning!
             local isRepetition = (self.GameHashHistory[self.Hash] and self.GameHashHistory[self.Hash] >= 1)
             local sc
-            if isRepetition and bestScore > 60 then
-                sc = -25 -- Refuse to repeat `Rh1 <-> Rg1` when ahead!
-            elseif idx == 1 or d <= 2 then
-                sc = -self:PVSearch(d - 1, -beta, -alpha, 2, true, m)
+            if isRepetition and bestScore > 60 then sc = -25
+            elseif idx == 1 or d <= 2 then sc = -self:PVSearch(d - 1, -beta, -alpha, 2, true, m)
             else
                 sc = -self:PVSearch(d - 1, -alpha - 1, -alpha, 2, true, m)
-                if not self.Aborted and sc > alpha then
-                    sc = -self:PVSearch(d - 1, -beta, -alpha, 2, true, m)
-                end
+                if not self.Aborted and sc > alpha then sc = -self:PVSearch(d - 1, -beta, -alpha, 2, true, m) end
             end
-
             self:UnmakeMove(1)
             if self.Aborted then break end
 
             iterScores[m.uci] = sc
-            if sc > iterBestSc then
-                iterBestSc = sc
-                iterBestM = m
-            end
-            if sc > alpha then
-                alpha = sc
-            end
+            if sc > iterBestSc then iterBestSc = sc; iterBestM = m end
+            if sc > alpha then alpha = sc end
         end
 
         if not self.Aborted then
             completedDepth = d
             bestScore = iterBestSc
             moveScores = iterScores
-
-            table.sort(legal, function(a, b)
-                return (moveScores[a.uci] or -99999) > (moveScores[b.uci] or -99999)
-            end)
+            table.sort(legal, function(a, b) return (moveScores[a.uci] or -99999) > (moveScores[b.uci] or -99999) end)
             bestMove = legal[1]
             secondMove = legal[2]
-
-            if onDepthDone then
-                pcall(onDepthDone, d, bestMove, bestScore, self.Nodes)
-            end
-
-            if math.abs(bestScore) >= 18000 or (os.clock() - startClock) >= (timeBudget * 0.62) then
-                break
-            end
+            if math.abs(bestScore) >= 18000 or (os.clock() - startClock) >= (timeBudget * 0.62) then break end
         else
             break
         end
@@ -1223,9 +1036,7 @@ function Engine:AnalyzeApex(side, timeBudget, onDepthDone)
     local childTT = TranspositionTable[self.Hash]
     local oppMoves = self:RootLegalMoves(-side)
     if childTT and childTT.bestUCI then
-        for _, om in ipairs(oppMoves) do
-            if om.uci == childTT.bestUCI then ponderMove = om; break end
-        end
+        for _, om in ipairs(oppMoves) do if om.uci == childTT.bestUCI then ponderMove = om; break end end
     end
     if not ponderMove and #oppMoves > 0 then
         self:OrderMoves(oppMoves, 2, nil, bestMove)
@@ -1262,10 +1073,10 @@ function Engine:ParseSAN(san, side)
 end
 
 --------------------------------------------------------------------------------
--- 7. UNCLIPPED SCROLL-PROOF MOVE SCRAPER & AUTO-CALIBRATED RAM BOARD SYNC
+-- 7. UI GEOMETRY & UNCLIPPED SAN SCRAPER (SAME-ROW SYMMETRIC FIX)
 --------------------------------------------------------------------------------
 local GuiRoot = Instance.new("ScreenGui")
-GuiRoot.Name = "RoChess_GM_ArrowESP_v11_Apex"
+GuiRoot.Name = "RoChess_GM_ArrowESP_v12_Apex"
 GuiRoot.ResetOnSpawn = false
 GuiRoot.IgnoreGuiInset = false
 GuiRoot.DisplayOrder = 100
@@ -1275,21 +1086,13 @@ if not okP or not GuiRoot.Parent then GuiRoot.Parent = PlayerGui end
 local function IsVisibleDeep(obj)
     local cur = obj
     while cur and cur ~= PlayerGui do
-        if (cur:IsA("GuiObject") and not cur.Visible) or (cur:IsA("LayerCollector") and not cur.Enabled) then
-            return false
-        end
+        if (cur:IsA("GuiObject") and not cur.Visible) or (cur:IsA("LayerCollector") and not cur.Enabled) then return false end
         cur = cur.Parent
     end
     return cur == PlayerGui
 end
 
-local UICache = {
-    BoardFrame = nil,
-    MoveScrollContainer = nil,
-    X = 0, Y = 0, W = 0, H = 0,
-    CachedSide = nil,
-    LastFullDiscovery = 0
-}
+local UICache = { BoardFrame = nil, MoveScrollContainer = nil, X = 0, Y = 0, W = 0, H = 0, CachedSide = nil, LastCheck = 0 }
 
 local function GetExactChessBoardGeometry()
     if UICache.BoardFrame and UICache.BoardFrame.Parent and IsVisibleDeep(UICache.BoardFrame) then
@@ -1301,35 +1104,26 @@ local function GetExactChessBoardGeometry()
     end
 
     local now = os.clock()
-    if now - UICache.LastFullDiscovery < 0.8 then
-        return nil
-    end
-    UICache.LastFullDiscovery = now
+    if now - UICache.LastCheck < 0.8 then return nil end
+    UICache.LastCheck = now
 
     local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(400, 850)
-    local bestFrame = nil
-    local bestScore = -1
+    local bestFrame, bestScore = nil, -1
 
     for _, d in ipairs(PlayerGui:GetDescendants()) do
         if d:IsA("GuiObject") and not d:IsDescendantOf(GuiRoot) and IsVisibleDeep(d) then
-            local sz = d.AbsoluteSize
-            local pos = d.AbsolutePosition
+            local sz, pos = d.AbsoluteSize, d.AbsolutePosition
             if sz.X >= 210 and sz.Y >= 210 and math.abs(sz.X - sz.Y) <= 10 and sz.Y <= vp.Y * 0.72 and pos.Y >= 30 then
                 local expectedTileW = sz.X / 8
                 local tileMatches = 0
                 for _, ch in ipairs(d:GetDescendants()) do
                     if ch:IsA("GuiObject") and ch.Visible then
                         local csz = ch.AbsoluteSize
-                        if math.abs(csz.X - expectedTileW) <= 6 and math.abs(csz.Y - expectedTileW) <= 6 then
-                            tileMatches += 1
-                        end
+                        if math.abs(csz.X - expectedTileW) <= 6 and math.abs(csz.Y - expectedTileW) <= 6 then tileMatches += 1 end
                     end
                 end
                 local score = tileMatches * 10 + (#d:GetDescendants())
-                if score > bestScore then
-                    bestScore = score
-                    bestFrame = d
-                end
+                if score > bestScore then bestScore = score; bestFrame = d end
             end
         end
     end
@@ -1343,15 +1137,11 @@ local function GetExactChessBoardGeometry()
         local boardBot = p.Y + s.Y - 12
         for _, d in ipairs(PlayerGui:GetDescendants()) do
             if d:IsA("ScrollingFrame") and not d:IsDescendantOf(GuiRoot) and IsVisibleDeep(d) then
-                if d.AbsolutePosition.Y >= boardBot - 25 then
-                    UICache.MoveScrollContainer = d
-                    break
-                end
+                if d.AbsolutePosition.Y >= boardBot - 25 then UICache.MoveScrollContainer = d; break end
             end
         end
         return UICache
     end
-
     return nil
 end
 
@@ -1360,17 +1150,14 @@ local function DetectBoardOrientation(bGeo)
     if not bGeo or not bGeo.BoardFrame then return 1 end
     local bx, by, bw, bh = bGeo.X, bGeo.Y, bGeo.W, bGeo.H
     local rank1Y, rank8Y = nil, nil
-
     local rootToScan = bGeo.BoardFrame.Parent or PlayerGui
+
     for _, d in ipairs(rootToScan:GetDescendants()) do
         if d:IsA("TextLabel") and d.Visible then
-            local pos = d.AbsolutePosition
-            local sz = d.AbsoluteSize
+            local pos, sz = d.AbsolutePosition, d.AbsoluteSize
             if sz.X < 36 and sz.Y < 36 and pos.X >= (bx - 28) and pos.X <= (bx + bw + 28) and pos.Y >= (by - 28) and pos.Y <= (by + bh + 28) then
                 local txt = string.gsub(d.Text, "%s+", "")
-                if txt == "1" then rank1Y = pos.Y
-                elseif txt == "8" then rank8Y = pos.Y
-                end
+                if txt == "1" then rank1Y = pos.Y elseif txt == "8" then rank8Y = pos.Y end
             end
         end
     end
@@ -1382,141 +1169,19 @@ local function DetectBoardOrientation(bGeo)
     return 1
 end
 
--- Auto-Calibrating RAMBoard #3 Sync (Recovers exact board position even at Move 60+ after RESET!)
-local RAMBridge = {
-    ActiveBoard = nil,
-    PieceMap = {},   -- Maps RoChess piece code -> our piece code (-6..6)
-    SqMap = {},      -- Maps our sq (1..64) -> RoChess board index
-    IsCalibrated = false
-}
-
-local function ScanRAMBoards()
-    if not getgc then return end
-    pcall(function()
-        local bestPly = -1
-        for _, obj in ipairs(getgc(true)) do
-            if type(obj) == "table" and not rawget(obj, "_IsOurAI") then
-                local brd = rawget(obj, "board")
-                local ply = rawget(obj, "ply")
-                local kingSq = rawget(obj, "kingSq")
-                if type(brd) == "table" and type(ply) == "number" and kingSq ~= nil then
-                    if ply >= bestPly then
-                        bestPly = ply
-                        RAMBridge.ActiveBoard = obj
-                    end
-                end
-            end
-        end
-    end)
-end
-
--- Automatically learns the exact square indexing & piece encoding of `RAMBridge.ActiveBoard` from any synced position!
-local function TryCalibrateRAMBridge(engine, ramObj)
-    if RAMBridge.IsCalibrated or not ramObj or type(ramObj.board) ~= "table" then return end
-    local rb = ramObj.board
-    local eb = engine.B
-
-    -- Test candidate square mappings:
-    -- 1) 1..64 standard (a1=1..h8=64)
-    -- 2) 1..64 rank-flipped (a8=1..h1=64)
-    -- 3) 0x88 (0..119 where sq = (rank-1)*16 + (file-1) or flipped)
-    -- 4) 10x12 mailbox (21..98)
-    local candidates = {
-        function(f, r) return (r - 1) * 8 + f end,
-        function(f, r) return (8 - r) * 8 + f end,
-        function(f, r) return (r - 1) * 8 + (f - 1) end,
-        function(f, r) return (8 - r) * 8 + (f - 1) end,
-        function(f, r) return (r - 1) * 16 + f end,
-        function(f, r) return (8 - r) * 16 + f end,
-        function(f, r) return (r + 1) * 10 + f + 1 end,
-        function(f, r) return (10 - r) * 10 + f + 1 end
-    }
-
-    for _, mapFn in ipairs(candidates) do
-        local pMap = {}
-        local emptyCode = nil
-        local valid = true
-        local distinctPieces = 0
-
-        for sq = 1, 64 do
-            local f, r = FR(sq)
-            local rIdx = mapFn(f, r)
-            local rv = rb[rIdx]
-            if rv == nil then valid = false; break end
-
-            local ourP = eb[sq]
-            if ourP == 0 then
-                if emptyCode == nil then
-                    emptyCode = rv
-                elseif rv ~= emptyCode then
-                    valid = false; break
-                end
-            else
-                if emptyCode ~= nil and rv == emptyCode then
-                    valid = false; break
-                end
-                if pMap[rv] == nil then
-                    pMap[rv] = ourP
-                    distinctPieces += 1
-                elseif pMap[rv] ~= ourP then
-                    valid = false; break
-                end
-            end
-        end
-
-        if valid and distinctPieces >= 6 then
-            pMap[emptyCode] = 0
-            RAMBridge.PieceMap = pMap
-            for sq = 1, 64 do
-                local f, r = FR(sq)
-                RAMBridge.SqMap[sq] = mapFn(f, r)
-            end
-            RAMBridge.IsCalibrated = true
-            Logger.Log("RAM-CAL", "Calibrated direct RAMBoard reader (" .. distinctPieces .. " piece types)!")
-            return
-        end
-    end
-end
-
-local function SyncFromCalibratedRAM(engine, ramObj)
-    if not RAMBridge.IsCalibrated or not ramObj or type(ramObj.board) ~= "table" then return false end
-    local rb = ramObj.board
-    local tempB = table.create(64)
-    for sq = 1, 64 do
-        local rv = rb[RAMBridge.SqMap[sq]]
-        local p = RAMBridge.PieceMap[rv]
-        if p == nil then return false end
-        tempB[sq] = p
-    end
-    for sq = 1, 64 do engine.B[sq] = tempB[sq] end
-    if type(ramObj.ply) == "number" then
-        engine.Side = (ramObj.ply % 2 == 0) and 1 or -1
-    end
-    engine:RecalculateIncrementalFromBoard()
-    return true
-end
-
--- Unclipped Scroll-Proof & Same-Row Symmetric Move Scraper (`4. Nxd4 Nxd4` / `14. cxb6 cxb6` 100% Fixed!)
 local PersistentMovesByPly = {}
-local IgnoredWords = {
-    draw = true, resign = true, abort = true, game = true, players = true,
-    bullet = true, blitz = true, rapid = true, report = true, opponent = true
-}
+local IgnoredWords = { draw = true, resign = true, abort = true, game = true, players = true, bullet = true, blitz = true, rapid = true, report = true, opponent = true }
 
 local function ScrapeMovesUnclipped(bGeo)
     if not bGeo then return 0 end
     local realBoardBottomY = bGeo.Y + bGeo.H - 8
     local rawElements = {}
-
     local hasScrollContainer = (UICache.MoveScrollContainer and UICache.MoveScrollContainer.Parent and IsVisibleDeep(UICache.MoveScrollContainer))
     local scanRoot = hasScrollContainer and UICache.MoveScrollContainer or PlayerGui
 
     for _, d in ipairs(scanRoot:GetDescendants()) do
         if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible and not d:IsDescendantOf(GuiRoot) then
-            local pos = d.AbsolutePosition
-            local sz = d.AbsoluteSize
-            -- CRITICAL FIX: If `d` is inside `MoveScrollContainer`, do NOT clip by `pos.Y >= realBoardBottomY`!
-            -- Scrolled-up rows have `pos.Y < realBoardBottomY` and MUST still be read so Ply 100+ endgames never lose Move 1!
+            local pos, sz = d.AbsolutePosition, d.AbsoluteSize
             local validY = hasScrollContainer or (pos.Y >= realBoardBottomY - 20 and pos.Y <= realBoardBottomY + 280)
             if validY and sz.Y >= 8 and sz.Y <= 44 then
                 local clean = string.gsub(string.gsub(d.Text, "<[^>]+>", ""), "^%s*(.-)%s*$", "%1")
@@ -1538,30 +1203,23 @@ local function ScrapeMovesUnclipped(bGeo)
             rows[#rows + 1] = { avgY = el.cy, items = { el } }
         else
             table.insert(lastRow.items, el)
-            local sumY = 0
-            for _, it in ipairs(lastRow.items) do sumY += it.cy end
+            local sumY = 0; for _, it in ipairs(lastRow.items) do sumY += it.cy end
             lastRow.avgY = sumY / #lastRow.items
         end
     end
 
     local maxPly = 0
-
     for _, row in ipairs(rows) do
         table.sort(row.items, function(a, b) return a.x < b.x end)
-
-        -- CRITICAL FIX FOR `4. Nxd4 Nxd4` AND `14. cxb6 cxb6`:
-        -- Only skip an item if it is at the EXACT SAME X coordinate (`math.abs(it.x - prevX) < 14`, i.e. button + child label),
-        -- NEVER when White and Black are in different columns (`math.abs(it.x - prevX) >= 20`)!
         local tokens = {}
         local lastItemX = -9999
         local lastItemText = ""
         for _, it in ipairs(row.items) do
+            -- Same-Row Symmetric Fix: only filter if X coordinate difference is < 16px (child label on same button)
             if not (it.text == lastItemText and math.abs(it.x - lastItemX) < 16) then
                 lastItemX = it.x
                 lastItemText = it.text
-                for tk in string.gmatch(it.text, "%S+") do
-                    tokens[#tokens + 1] = tk
-                end
+                for tk in string.gmatch(it.text, "%S+") do tokens[#tokens + 1] = tk end
             end
         end
 
@@ -1573,10 +1231,7 @@ local function ScrapeMovesUnclipped(bGeo)
                 rowMoveNum = numMatch
             else
                 local stripped = string.gsub(tk, "[+#!?]", "")
-                if
-                    stripped == "O-O" or stripped == "O-O-O" or
-                    string.match(stripped, "^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8]=?[QRNB]?$")
-                then
+                if stripped == "O-O" or stripped == "O-O-O" or string.match(stripped, "^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8]=?[QRNB]?$") then
                     rowSANs[#rowSANs + 1] = stripped
                 end
             end
@@ -1584,9 +1239,7 @@ local function ScrapeMovesUnclipped(bGeo)
 
         if rowMoveNum and #rowSANs >= 1 then
             if rowMoveNum == 1 and #rowSANs == 1 then
-                for k in pairs(PersistentMovesByPly) do
-                    if k > 2 then PersistentMovesByPly[k] = nil end
-                end
+                for k in pairs(PersistentMovesByPly) do if k > 2 then PersistentMovesByPly[k] = nil end end
                 UICache.CachedSide = nil
             end
             local wPly = (rowMoveNum - 1) * 2 + 1
@@ -1604,14 +1257,9 @@ local function ScrapeMovesUnclipped(bGeo)
 
     for k in pairs(PersistentMovesByPly) do
         if k > maxPly and maxPly > 0 then
-            if maxPly <= 2 then
-                PersistentMovesByPly[k] = nil
-            else
-                maxPly = math.max(maxPly, k)
-            end
+            if maxPly <= 2 then PersistentMovesByPly[k] = nil else maxPly = math.max(maxPly, k) end
         end
     end
-
     return maxPly
 end
 
@@ -1619,7 +1267,7 @@ end
 -- 8. VIP PRECISION ARROW ESP RENDERER
 --------------------------------------------------------------------------------
 local Overlay = Instance.new("Frame", GuiRoot)
-Overlay.Name = "VIP_ESP_Overlay_v11"
+Overlay.Name = "VIP_ESP_Overlay_v12"
 Overlay.Size = UDim2.new(1, 0, 1, 0)
 Overlay.BackgroundTransparency = 1
 Overlay.Active = false
@@ -1630,9 +1278,7 @@ BoardLockBox.BorderSizePixel = 0
 BoardLockBox.Visible = false
 BoardLockBox.ZIndex = 20
 local BoardLockStroke = Instance.new("UIStroke", BoardLockBox)
-BoardLockStroke.Color = Color3.fromRGB(70, 215, 130)
-BoardLockStroke.Thickness = 1.5
-BoardLockStroke.Transparency = 0.45
+BoardLockStroke.Color = Color3.fromRGB(70, 215, 130); BoardLockStroke.Thickness = 1.5; BoardLockStroke.Transparency = 0.45
 
 local DangerBox = Instance.new("Frame", Overlay)
 DangerBox.BackgroundColor3 = Color3.fromRGB(255, 45, 45)
@@ -1642,92 +1288,47 @@ DangerBox.Visible = false
 DangerBox.ZIndex = 35
 Instance.new("UICorner", DangerBox).CornerRadius = UDim.new(0, 6)
 local DangerStroke = Instance.new("UIStroke", DangerBox)
-DangerStroke.Color = Color3.fromRGB(255, 80, 80)
-DangerStroke.Thickness = 2.5
+DangerStroke.Color = Color3.fromRGB(255, 80, 80); DangerStroke.Thickness = 2.5
 
 local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
     local arrow = {}
-
     arrow.OriginBox = Instance.new("Frame", Overlay)
-    arrow.OriginBox.BackgroundColor3 = mainColor
-    arrow.OriginBox.BackgroundTransparency = 0.72
-    arrow.OriginBox.BorderSizePixel = 0
-    arrow.OriginBox.ZIndex = zBase
-    arrow.OriginBox.Visible = false
+    arrow.OriginBox.BackgroundColor3 = mainColor; arrow.OriginBox.BackgroundTransparency = 0.72; arrow.OriginBox.BorderSizePixel = 0; arrow.OriginBox.ZIndex = zBase; arrow.OriginBox.Visible = false
     Instance.new("UICorner", arrow.OriginBox).CornerRadius = UDim.new(0, 6)
-    local os = Instance.new("UIStroke", arrow.OriginBox)
-    os.Color = mainColor; os.Thickness = 2.2; os.Transparency = 0.15
+    local os = Instance.new("UIStroke", arrow.OriginBox); os.Color = mainColor; os.Thickness = 2.2; os.Transparency = 0.15
 
     arrow.TargetBox = Instance.new("Frame", Overlay)
-    arrow.TargetBox.BackgroundColor3 = mainColor
-    arrow.TargetBox.BackgroundTransparency = 0.66
-    arrow.TargetBox.BorderSizePixel = 0
-    arrow.TargetBox.ZIndex = zBase
-    arrow.TargetBox.Visible = false
+    arrow.TargetBox.BackgroundColor3 = mainColor; arrow.TargetBox.BackgroundTransparency = 0.66; arrow.TargetBox.BorderSizePixel = 0; arrow.TargetBox.ZIndex = zBase; arrow.TargetBox.Visible = false
     Instance.new("UICorner", arrow.TargetBox).CornerRadius = UDim.new(0, 6)
-    local ts = Instance.new("UIStroke", arrow.TargetBox)
-    ts.Color = mainColor; ts.Thickness = 2.4; ts.Transparency = 0.1
+    local ts = Instance.new("UIStroke", arrow.TargetBox); ts.Color = mainColor; ts.Thickness = 2.4; ts.Transparency = 0.1
 
     arrow.Shaft = Instance.new("Frame", Overlay)
-    arrow.Shaft.BackgroundColor3 = mainColor
-    arrow.Shaft.BackgroundTransparency = trans
-    arrow.Shaft.BorderSizePixel = 0
-    arrow.Shaft.AnchorPoint = Vector2.new(0.5, 0.5)
-    arrow.Shaft.ZIndex = zBase + 1
-    arrow.Shaft.Visible = false
+    arrow.Shaft.BackgroundColor3 = mainColor; arrow.Shaft.BackgroundTransparency = trans; arrow.Shaft.BorderSizePixel = 0; arrow.Shaft.AnchorPoint = Vector2.new(0.5, 0.5); arrow.Shaft.ZIndex = zBase + 1; arrow.Shaft.Visible = false
     Instance.new("UICorner", arrow.Shaft).CornerRadius = UDim.new(0, 4)
 
     arrow.LeftWing = Instance.new("Frame", Overlay)
-    arrow.LeftWing.BackgroundColor3 = mainColor
-    arrow.LeftWing.BackgroundTransparency = trans
-    arrow.LeftWing.BorderSizePixel = 0
-    arrow.LeftWing.AnchorPoint = Vector2.new(0.5, 0.5)
-    arrow.LeftWing.ZIndex = zBase + 3
-    arrow.LeftWing.Visible = false
+    arrow.LeftWing.BackgroundColor3 = mainColor; arrow.LeftWing.BackgroundTransparency = trans; arrow.LeftWing.BorderSizePixel = 0; arrow.LeftWing.AnchorPoint = Vector2.new(0.5, 0.5); arrow.LeftWing.ZIndex = zBase + 3; arrow.LeftWing.Visible = false
     Instance.new("UICorner", arrow.LeftWing).CornerRadius = UDim.new(1, 0)
 
     arrow.RightWing = Instance.new("Frame", Overlay)
-    arrow.RightWing.BackgroundColor3 = mainColor
-    arrow.RightWing.BackgroundTransparency = trans
-    arrow.RightWing.BorderSizePixel = 0
-    arrow.RightWing.AnchorPoint = Vector2.new(0.5, 0.5)
-    arrow.RightWing.ZIndex = zBase + 3
-    arrow.RightWing.Visible = false
+    arrow.RightWing.BackgroundColor3 = mainColor; arrow.RightWing.BackgroundTransparency = trans; arrow.RightWing.BorderSizePixel = 0; arrow.RightWing.AnchorPoint = Vector2.new(0.5, 0.5); arrow.RightWing.ZIndex = zBase + 3; arrow.RightWing.Visible = false
     Instance.new("UICorner", arrow.RightWing).CornerRadius = UDim.new(1, 0)
 
     arrow.HeadFill = {}
     for i = 1, 10 do
         local s = Instance.new("Frame", Overlay)
-        s.BackgroundColor3 = mainColor
-        s.BackgroundTransparency = trans
-        s.BorderSizePixel = 0
-        s.AnchorPoint = Vector2.new(0.5, 0.5)
-        s.ZIndex = zBase + 2
-        s.Visible = false
+        s.BackgroundColor3 = mainColor; s.BackgroundTransparency = trans; s.BorderSizePixel = 0; s.AnchorPoint = Vector2.new(0.5, 0.5); s.ZIndex = zBase + 2; s.Visible = false
         arrow.HeadFill[i] = s
     end
 
     arrow.Badge = Instance.new("TextLabel", Overlay)
-    arrow.Badge.Size = UDim2.fromOffset(64, 18)
-    arrow.Badge.AnchorPoint = Vector2.new(0.5, 0.5)
-    arrow.Badge.BackgroundColor3 = badgeBgColor
-    arrow.Badge.BackgroundTransparency = 0.08
-    arrow.Badge.Font = Enum.Font.GothamBold
-    arrow.Badge.TextSize = 10
-    arrow.Badge.TextColor3 = Color3.new(1, 1, 1)
-    arrow.Badge.ZIndex = zBase + 5
-    arrow.Badge.Visible = false
+    arrow.Badge.Size = UDim2.fromOffset(64, 18); arrow.Badge.AnchorPoint = Vector2.new(0.5, 0.5); arrow.Badge.BackgroundColor3 = badgeBgColor; arrow.Badge.BackgroundTransparency = 0.08
+    arrow.Badge.Font = Enum.Font.GothamBold; arrow.Badge.TextSize = 10; arrow.Badge.TextColor3 = Color3.new(1, 1, 1); arrow.Badge.ZIndex = zBase + 5; arrow.Badge.Visible = false
     Instance.new("UICorner", arrow.Badge).CornerRadius = UDim.new(0, 5)
-    local bs = Instance.new("UIStroke", arrow.Badge)
-    bs.Color = mainColor; bs.Thickness = 1.3
+    local bs = Instance.new("UIStroke", arrow.Badge); bs.Color = mainColor; bs.Thickness = 1.3
 
     function arrow:Hide()
-        self.OriginBox.Visible = false
-        self.TargetBox.Visible = false
-        self.Shaft.Visible = false
-        self.LeftWing.Visible = false
-        self.RightWing.Visible = false
-        self.Badge.Visible = false
+        self.OriginBox.Visible = false; self.TargetBox.Visible = false; self.Shaft.Visible = false; self.LeftWing.Visible = false; self.RightWing.Visible = false; self.Badge.Visible = false
         for i = 1, 10 do self.HeadFill[i].Visible = false end
     end
 
@@ -1735,19 +1336,13 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
         local dx, dy = tx - fx, ty - fy
         local dist = math.sqrt(dx * dx + dy * dy)
         if dist < 4 then self:Hide(); return end
-
         local ux, uy = dx / dist, dy / dist
         local px, py = -uy, ux
         local angDeg = math.deg(math.atan2(dy, dx))
-
         local boxSz = math.floor(cellW * 0.88)
-        self.OriginBox.Size = UDim2.fromOffset(boxSz, boxSz)
-        self.OriginBox.Position = UDim2.fromOffset(fx - boxSz * 0.5, fy - boxSz * 0.5)
-        self.OriginBox.Visible = true
 
-        self.TargetBox.Size = UDim2.fromOffset(boxSz, boxSz)
-        self.TargetBox.Position = UDim2.fromOffset(tx - boxSz * 0.5, ty - boxSz * 0.5)
-        self.TargetBox.Visible = true
+        self.OriginBox.Size = UDim2.fromOffset(boxSz, boxSz); self.OriginBox.Position = UDim2.fromOffset(fx - boxSz * 0.5, fy - boxSz * 0.5); self.OriginBox.Visible = true
+        self.TargetBox.Size = UDim2.fromOffset(boxSz, boxSz); self.TargetBox.Position = UDim2.fromOffset(tx - boxSz * 0.5, ty - boxSz * 0.5); self.TargetBox.Visible = true
 
         local headLen = math.clamp(cellW * 0.48, 15, 30)
         local headHalfW = math.clamp(cellW * 0.28, 9, 18)
@@ -1757,31 +1352,24 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
 
         self.Shaft.Size = UDim2.fromOffset(shaftLen, shaftThk)
         self.Shaft.Position = UDim2.fromOffset(fx + ux * (startPad + shaftLen * 0.5), fy + uy * (startPad + shaftLen * 0.5))
-        self.Shaft.Rotation = angDeg
-        self.Shaft.Visible = true
+        self.Shaft.Rotation = angDeg; self.Shaft.Visible = true
 
         local baseX = tx - ux * headLen
         local baseY = ty - uy * headLen
-
         local leftCornerX = baseX + px * headHalfW
         local leftCornerY = baseY + py * headHalfW
         local rightCornerX = baseX - px * headHalfW
         local rightCornerY = baseY - py * headHalfW
-
         local wingLen = math.sqrt(headLen * headLen + headHalfW * headHalfW)
         local wingThk = math.max(3, shaftThk * 0.35)
 
-        local ldx, ldy = leftCornerX - tx, leftCornerY - ty
         self.LeftWing.Size = UDim2.fromOffset(wingLen, wingThk)
         self.LeftWing.Position = UDim2.fromOffset((tx + leftCornerX) * 0.5, (ty + leftCornerY) * 0.5)
-        self.LeftWing.Rotation = math.deg(math.atan2(ldy, ldx))
-        self.LeftWing.Visible = true
+        self.LeftWing.Rotation = math.deg(math.atan2(leftCornerY - ty, leftCornerX - tx)); self.LeftWing.Visible = true
 
-        local rdx, rdy = rightCornerX - tx, rightCornerY - ty
         self.RightWing.Size = UDim2.fromOffset(wingLen, wingThk)
         self.RightWing.Position = UDim2.fromOffset((tx + rightCornerX) * 0.5, (ty + rightCornerY) * 0.5)
-        self.RightWing.Rotation = math.deg(math.atan2(rdy, rdx))
-        self.RightWing.Visible = true
+        self.RightWing.Rotation = math.deg(math.atan2(rightCornerY - ty, rightCornerX - tx)); self.RightWing.Visible = true
 
         local nSlices = #self.HeadFill
         local stepLen = headLen / nSlices
@@ -1791,8 +1379,7 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
             local sl = self.HeadFill[i]
             sl.Size = UDim2.fromOffset(stepLen + 1.5, w)
             sl.Position = UDim2.fromOffset(baseX + ux * (t * headLen), baseY + uy * (t * headLen))
-            sl.Rotation = angDeg
-            sl.Visible = true
+            sl.Rotation = angDeg; sl.Visible = true
         end
 
         if Config.ShowMoveBadges and badgeText and badgeText ~= "" then
@@ -1805,7 +1392,6 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
             self.Badge.Visible = false
         end
     end
-
     return arrow
 end
 
@@ -1814,33 +1400,17 @@ local AltArrow = CreateVIPArrow(Color3.fromRGB(40, 185, 235), Color3.fromRGB(15,
 local PonderArrow = CreateVIPArrow(Color3.fromRGB(245, 145, 30), Color3.fromRGB(45, 25, 12), 0.38, 45)
 
 local EvalBg = Instance.new("Frame", Overlay)
-EvalBg.BackgroundColor3 = Color3.fromRGB(28, 32, 40)
-EvalBg.BorderSizePixel = 0
-EvalBg.Visible = false
-EvalBg.ZIndex = 60
+EvalBg.BackgroundColor3 = Color3.fromRGB(28, 32, 40); EvalBg.BorderSizePixel = 0; EvalBg.Visible = false; EvalBg.ZIndex = 60
 Instance.new("UICorner", EvalBg).CornerRadius = UDim.new(0, 4)
-local EvalStroke = Instance.new("UIStroke", EvalBg)
-EvalStroke.Color = Color3.fromRGB(75, 85, 105); EvalStroke.Thickness = 1
+local EvalStroke = Instance.new("UIStroke", EvalBg); EvalStroke.Color = Color3.fromRGB(75, 85, 105); EvalStroke.Thickness = 1
 
 local EvalFill = Instance.new("Frame", EvalBg)
-EvalFill.BackgroundColor3 = Color3.fromRGB(105, 225, 95)
-EvalFill.BorderSizePixel = 0
-EvalFill.AnchorPoint = Vector2.new(0, 1)
-EvalFill.Position = UDim2.new(0, 0, 1, 0)
-EvalFill.Size = UDim2.new(1, 0, 0.5, 0)
-EvalFill.ZIndex = 61
+EvalFill.BackgroundColor3 = Color3.fromRGB(105, 225, 95); EvalFill.BorderSizePixel = 0; EvalFill.AnchorPoint = Vector2.new(0, 1); EvalFill.Position = UDim2.new(0, 0, 1, 0); EvalFill.Size = UDim2.new(1, 0, 0.5, 0); EvalFill.ZIndex = 61
 Instance.new("UICorner", EvalFill).CornerRadius = UDim.new(0, 4)
 
 local EvalText = Instance.new("TextLabel", EvalBg)
-EvalText.Size = UDim2.fromOffset(38, 16)
-EvalText.AnchorPoint = Vector2.new(0.5, 1)
-EvalText.Position = UDim2.new(0.5, 0, 0, -3)
-EvalText.BackgroundColor3 = Color3.fromRGB(16, 20, 28)
-EvalText.Font = Enum.Font.GothamBold
-EvalText.TextSize = 9
-EvalText.TextColor3 = Color3.fromRGB(130, 240, 145)
-EvalText.Text = "+0.0"
-EvalText.ZIndex = 62
+EvalText.Size = UDim2.fromOffset(38, 16); EvalText.AnchorPoint = Vector2.new(0.5, 1); EvalText.Position = UDim2.new(0.5, 0, 0, -3); EvalText.BackgroundColor3 = Color3.fromRGB(16, 20, 28)
+EvalText.Font = Enum.Font.GothamBold; EvalText.TextSize = 9; EvalText.TextColor3 = Color3.fromRGB(130, 240, 145); EvalText.Text = "+0.0"; EvalText.ZIndex = 62
 Instance.new("UICorner", EvalText).CornerRadius = UDim.new(0, 4)
 
 local function ComputeExactSqCenter(bGeo, sqIdx, mySide)
@@ -1848,94 +1418,47 @@ local function ComputeExactSqCenter(bGeo, sqIdx, mySide)
     local col = (mySide == 1) and (f - 1) or (8 - f)
     local row = (mySide == 1) and (8 - r) or (r - 1)
     local cw = bGeo.W / 8
-    local ch = bGeo.H / 8
-    return math.floor(bGeo.X + (col + 0.5) * cw), math.floor(bGeo.Y + (row + 0.5) * ch), cw
+    return math.floor(bGeo.X + (col + 0.5) * cw), math.floor(bGeo.Y + (row + 0.5) * cw), cw
 end
 
 --------------------------------------------------------------------------------
--- 9. APEX v11 CONTROL MENU & LIVE LOG WINDOW
+-- 9. APEX v12 CONTROL MENU & LIVE LOG WINDOW
 --------------------------------------------------------------------------------
 local Menu = Instance.new("Frame", GuiRoot)
 Menu.Size = UDim2.new(0, 330, 0, 174)
 Menu.Position = UDim2.new(0.03, 0, 0.44, 0)
-Menu.BackgroundColor3 = Color3.fromRGB(14, 18, 25)
-Menu.BorderSizePixel = 0
-Menu.Active = true
-Menu.Draggable = true
+Menu.BackgroundColor3 = Color3.fromRGB(14, 18, 25); Menu.BorderSizePixel = 0; Menu.Active = true; Menu.Draggable = true
 Instance.new("UICorner", Menu).CornerRadius = UDim.new(0, 9)
-local MenuStroke = Instance.new("UIStroke", Menu)
-MenuStroke.Color = Color3.fromRGB(95, 225, 65); MenuStroke.Thickness = 1.6
+local MenuStroke = Instance.new("UIStroke", Menu); MenuStroke.Color = Color3.fromRGB(95, 225, 65); MenuStroke.Thickness = 1.6
 
 local Title = Instance.new("TextLabel", Menu)
-Title.Size = UDim2.new(1, -38, 0, 22)
-Title.Position = UDim2.new(0, 10, 0, 4)
-Title.BackgroundTransparency = 1
-Title.Font = Enum.Font.GothamBold
-Title.TextSize = 12
-Title.TextColor3 = Color3.fromRGB(120, 250, 95)
-Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.Text = "RoChess! GM Arrow ESP v11 [APEX ENGINE]"
+Title.Size = UDim2.new(1, -38, 0, 22); Title.Position = UDim2.new(0, 10, 0, 4); Title.BackgroundTransparency = 1; Title.Font = Enum.Font.GothamBold; Title.TextSize = 12; Title.TextColor3 = Color3.fromRGB(120, 250, 95); Title.TextXAlignment = Enum.TextXAlignment.Left; Title.Text = "RoChess! GM Arrow ESP v12 [APEX ELO 2000+]"
 
 local MinBtn = Instance.new("TextButton", Menu)
-MinBtn.Size = UDim2.fromOffset(24, 20)
-MinBtn.Position = UDim2.new(1, -28, 0, 4)
-MinBtn.BackgroundColor3 = Color3.fromRGB(35, 42, 58)
-MinBtn.Font = Enum.Font.GothamBold
-MinBtn.TextSize = 12
-MinBtn.TextColor3 = Color3.new(1, 1, 1)
-MinBtn.Text = "-"
+MinBtn.Size = UDim2.fromOffset(24, 20); MinBtn.Position = UDim2.new(1, -28, 0, 4); MinBtn.BackgroundColor3 = Color3.fromRGB(35, 42, 58); MinBtn.Font = Enum.Font.GothamBold; MinBtn.TextSize = 12; MinBtn.TextColor3 = Color3.new(1, 1, 1); MinBtn.Text = "-"
 Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 4)
 
 local Status = Instance.new("TextLabel", Menu)
-Status.Size = UDim2.new(1, -20, 0, 82)
-Status.Position = UDim2.new(0, 10, 0, 26)
-Status.BackgroundTransparency = 1
-Status.Font = Enum.Font.Code
-Status.TextSize = 11
-Status.TextColor3 = Color3.fromRGB(225, 235, 245)
-Status.TextXAlignment = Enum.TextXAlignment.Left
-Status.TextYAlignment = Enum.TextYAlignment.Top
-Status.TextWrapped = true
-Status.Text = "Apex Engine v11 Ready (20k+ nodes/turn)..."
+Status.Size = UDim2.new(1, -20, 0, 82); Status.Position = UDim2.new(0, 10, 0, 26); Status.BackgroundTransparency = 1; Status.Font = Enum.Font.Code; Status.TextSize = 11; Status.TextColor3 = Color3.fromRGB(225, 235, 245); Status.TextXAlignment = Enum.TextXAlignment.Left; Status.TextYAlignment = Enum.TextYAlignment.Top; Status.TextWrapped = true; Status.Text = "Apex v12 Ready (Elo 2000+ Engine)..."
 
 local MenuButtons = {}
 local function AddMenuBtn(txt, xS, yOff, col, fn)
     local b = Instance.new("TextButton", Menu)
-    b.Size = UDim2.new(0.31, -4, 0, 24)
-    b.Position = UDim2.new(xS, 8, 1, yOff)
-    b.BackgroundColor3 = col
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 10
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.Text = txt
+    b.Size = UDim2.new(0.31, -4, 0, 24); b.Position = UDim2.new(xS, 8, 1, yOff); b.BackgroundColor3 = col; b.Font = Enum.Font.GothamBold; b.TextSize = 10; b.TextColor3 = Color3.new(1, 1, 1); b.Text = txt
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
     b.MouseButton1Click:Connect(function() fn(b) end)
     MenuButtons[#MenuButtons + 1] = b
     return b
 end
 
-local RenderState = {
-    Ready = false,
-    Best = nil,
-    Alt = nil,
-    Ponder = nil,
-    Score = 0,
-    Meta = "",
-    Side = 1,
-    InCheckSq = nil,
-    ForceRecalc = false
-}
+local RenderState = { Ready = false, Best = nil, Alt = nil, Ponder = nil, Score = 0, Meta = "", Side = 1, InCheckSq = nil, ForceRecalc = false }
 
 AddMenuBtn("ESP: ON", 0.00, -56, Color3.fromRGB(45, 150, 65), function(b)
     Config.ESPEnabled = not Config.ESPEnabled
     b.Text = Config.ESPEnabled and "ESP: ON" or "ESP: OFF"
     b.BackgroundColor3 = Config.ESPEnabled and Color3.fromRGB(45, 150, 65) or Color3.fromRGB(140, 45, 45)
-    if not Config.ESPEnabled then
-        BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
-        EvalBg.Visible = false; BoardLockBox.Visible = false; DangerBox.Visible = false
-    else
-        RenderState.ForceRecalc = true
-    end
+    if not Config.ESPEnabled then BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide(); EvalBg.Visible = false; BoardLockBox.Visible = false; DangerBox.Visible = false
+    else RenderState.ForceRecalc = true end
 end)
 
 AddMenuBtn("Alt+Ponder: ON", 0.33, -56, Color3.fromRGB(35, 130, 175), function(b)
@@ -1948,13 +1471,13 @@ end)
 
 local TimePresets = {
     { label = "Time: 0.25s", val = 0.25 },
-    { label = "Time: 0.42s", val = 0.42 },
+    { label = "Time: 0.38s", val = 0.38 },
     { label = "Time: 0.75s", val = 0.75 },
     { label = "Time: 1.25s", val = 1.25 }
 }
 local TimePresetIdx = 2
 
-AddMenuBtn("Time: 0.42s", 0.66, -56, Color3.fromRGB(50, 68, 115), function(b)
+AddMenuBtn("Time: 0.38s", 0.66, -56, Color3.fromRGB(50, 68, 115), function(b)
     TimePresetIdx = (TimePresetIdx % #TimePresets) + 1
     Config.ThinkTimeLimit = TimePresets[TimePresetIdx].val
     b.Text = TimePresets[TimePresetIdx].label
@@ -1971,63 +1494,29 @@ AddMenuBtn("Side: AUTO", 0.00, -28, Color3.fromRGB(60, 75, 95), function(b)
 end)
 
 AddMenuBtn("RECALC NOW", 0.33, -28, Color3.fromRGB(40, 130, 135), function()
-    -- IMPORTANT: Does NOT wipe scrolled-off history in PersistentMovesByPly so endgame recalculation never drops to Ply 0!
     UICache.BoardFrame = nil
     UICache.CachedSide = nil
-    ScanRAMBoards()
     RenderState.ForceRecalc = true
-    Logger.Log("CMD", "Recalculated position (Preserved scrolled history + RAM sync).")
+    Logger.Log("CMD", "Forced instant recalculation.")
 end)
 
 local LogBox = Instance.new("Frame", GuiRoot)
-LogBox.Size = UDim2.new(0, 330, 0, 155)
-LogBox.Position = UDim2.new(0.03, 0, 0.68, 0)
-LogBox.BackgroundColor3 = Color3.fromRGB(10, 13, 18)
-LogBox.BorderSizePixel = 0
-LogBox.Active = true
-LogBox.Draggable = true
-LogBox.Visible = Logger.Visible
+LogBox.Size = UDim2.new(0, 330, 0, 155); LogBox.Position = UDim2.new(0.03, 0, 0.68, 0); LogBox.BackgroundColor3 = Color3.fromRGB(10, 13, 18); LogBox.BorderSizePixel = 0; LogBox.Active = true; LogBox.Draggable = true; LogBox.Visible = Logger.Visible
 Instance.new("UICorner", LogBox).CornerRadius = UDim.new(0, 8)
 Instance.new("UIStroke", LogBox).Color = Color3.fromRGB(220, 150, 45)
 
 local LogTxt = Instance.new("TextLabel", LogBox)
-LogTxt.Size = UDim2.new(1, -12, 1, -30)
-LogTxt.Position = UDim2.new(0, 6, 0, 4)
-LogTxt.BackgroundTransparency = 1
-LogTxt.Font = Enum.Font.Code
-LogTxt.TextSize = 10
-LogTxt.TextColor3 = Color3.fromRGB(210, 240, 215)
-LogTxt.TextXAlignment = Enum.TextXAlignment.Left
-LogTxt.TextYAlignment = Enum.TextYAlignment.Top
-LogTxt.TextWrapped = true
-LogTxt.ClipsDescendants = true
-LogTxt.Text = ""
+LogTxt.Size = UDim2.new(1, -12, 1, -30); LogTxt.Position = UDim2.new(0, 6, 0, 4); LogTxt.BackgroundTransparency = 1; LogTxt.Font = Enum.Font.Code; LogTxt.TextSize = 10; LogTxt.TextColor3 = Color3.fromRGB(210, 240, 215); LogTxt.TextXAlignment = Enum.TextXAlignment.Left; LogTxt.TextYAlignment = Enum.TextYAlignment.Top; LogTxt.TextWrapped = true; LogTxt.ClipsDescendants = true; LogTxt.Text = ""
 
-Logger.OnChange = function()
-    LogTxt.Text = Logger.GetText()
-end
+Logger.OnChange = function() LogTxt.Text = Logger.GetText() end
 
 local CopyBtn = Instance.new("TextButton", LogBox)
-CopyBtn.Size = UDim2.new(0.48, -6, 0, 20)
-CopyBtn.Position = UDim2.new(0, 6, 1, -23)
-CopyBtn.BackgroundColor3 = Color3.fromRGB(115, 70, 155)
-CopyBtn.Font = Enum.Font.GothamBold
-CopyBtn.TextSize = 10
-CopyBtn.TextColor3 = Color3.new(1, 1, 1)
-CopyBtn.Text = "COPY LOG"
+CopyBtn.Size = UDim2.new(0.48, -6, 0, 20); CopyBtn.Position = UDim2.new(0, 6, 1, -23); CopyBtn.BackgroundColor3 = Color3.fromRGB(115, 70, 155); CopyBtn.Font = Enum.Font.GothamBold; CopyBtn.TextSize = 10; CopyBtn.TextColor3 = Color3.new(1, 1, 1); CopyBtn.Text = "COPY LOG"
 Instance.new("UICorner", CopyBtn).CornerRadius = UDim.new(0, 4)
-CopyBtn.MouseButton1Click:Connect(function()
-    if setclipboard then setclipboard(Logger.GetText()); Logger.Log("SYS", "Copied log!") end
-end)
+CopyBtn.MouseButton1Click:Connect(function() if setclipboard then setclipboard(Logger.GetText()); Logger.Log("SYS", "Copied log!") end end)
 
 local ClearBtn = Instance.new("TextButton", LogBox)
-ClearBtn.Size = UDim2.new(0.48, -6, 0, 20)
-ClearBtn.Position = UDim2.new(0.52, 0, 1, -23)
-ClearBtn.BackgroundColor3 = Color3.fromRGB(140, 50, 50)
-ClearBtn.Font = Enum.Font.GothamBold
-ClearBtn.TextSize = 10
-ClearBtn.TextColor3 = Color3.new(1, 1, 1)
-ClearBtn.Text = "CLEAR LOG"
+ClearBtn.Size = UDim2.new(0.48, -6, 0, 20); ClearBtn.Position = UDim2.new(0.52, 0, 1, -23); ClearBtn.BackgroundColor3 = Color3.fromRGB(140, 50, 50); ClearBtn.Font = Enum.Font.GothamBold; ClearBtn.TextSize = 10; ClearBtn.TextColor3 = Color3.new(1, 1, 1); ClearBtn.Text = "CLEAR LOG"
 Instance.new("UICorner", ClearBtn).CornerRadius = UDim.new(0, 4)
 ClearBtn.MouseButton1Click:Connect(Logger.Clear)
 
@@ -2048,7 +1537,7 @@ MinBtn.MouseButton1Click:Connect(function()
 end)
 
 --------------------------------------------------------------------------------
--- 10. 60FPS RENDER LOOP & APEX AI LOOP
+-- 10. 60FPS RENDER LOOP & APEX AI LOOP v12
 --------------------------------------------------------------------------------
 local RenderConn = RunService.RenderStepped:Connect(function()
     if not Config.ESPEnabled then
@@ -2087,8 +1576,7 @@ local RenderConn = RunService.RenderStepped:Connect(function()
     local bm = RenderState.Best
     local fx, fy, cw = ComputeExactSqCenter(bGeo, bm.from, mySide)
     local tx, ty = ComputeExactSqCenter(bGeo, bm.to, mySide)
-    local bestTag = string.format("%s (%+.1f)", bm.san or bm.uci, RenderState.Score / 100)
-    BestArrow:Draw(fx, fy, tx, ty, cw, bestTag)
+    BestArrow:Draw(fx, fy, tx, ty, cw, string.format("%s (%+.1f)", bm.san or bm.uci, RenderState.Score / 100))
 
     if Config.ShowAltArrow and RenderState.Alt then
         local am = RenderState.Alt
@@ -2123,15 +1611,14 @@ local RenderConn = RunService.RenderStepped:Connect(function()
 end)
 
 local Running = true
-_G.RoChessV11Cleanup = function()
+_G.RoChessV12Cleanup = function()
     Running = false
     Engine.Aborted = true
     if RenderConn then pcall(function() RenderConn:Disconnect() end) end
     if GuiRoot and GuiRoot.Parent then GuiRoot:Destroy() end
 end
 
-Logger.Log("INIT", "v11.0 APEX Loaded (Symmetric SAN Fix + Repetition Guard + Endgame Box-Cut).")
-task.spawn(ScanRAMBoards)
+Logger.Log("INIT", "v12.0 Apex Elo 2000+ Loaded.")
 
 local LastStateSig = ""
 
@@ -2153,37 +1640,17 @@ task.spawn(function()
 
                 Engine:Reset()
                 local applied = 0
-                local parseBroken = false
-
                 for ply = 1, maxPly do
                     local san = PersistentMovesByPly[ply]
-                    if not san then
-                        parseBroken = true
-                        break
-                    end
+                    if not san then break end
                     local m = Engine:ParseSAN(san, (ply % 2 == 1) and 1 or -1)
                     if m then
-                        Engine:MakeMove(m, 119)
+                        Engine:MakeMove(m, 122)
                         table.insert(Engine.Hist, m.uci)
                         Engine.GameHashHistory[Engine.Hash] = (Engine.GameHashHistory[Engine.Hash] or 0) + 1
                         applied += 1
                     else
-                        Logger.Log("WARN", string.format("Ply %d (%s) mismatch; checking RAM fallback", ply, tostring(san)))
-                        parseBroken = true
                         break
-                    end
-                end
-
-                -- Auto-calibrate RAMBridge when SAN is clean, or recover from RAMBridge if mid-game/endgame SAN had a gap!
-                if not RAMBridge.ActiveBoard then
-                    ScanRAMBoards()
-                end
-                if not parseBroken and RAMBridge.ActiveBoard and RAMBridge.ActiveBoard.ply == applied then
-                    TryCalibrateRAMBridge(Engine, RAMBridge.ActiveBoard)
-                elseif parseBroken and RAMBridge.ActiveBoard then
-                    if SyncFromCalibratedRAM(Engine, RAMBridge.ActiveBoard) then
-                        applied = RAMBridge.ActiveBoard.ply or applied
-                        Logger.Log("RAM-OK", "Recovered exact board state from RAMBoard at ply " .. tostring(applied))
                     end
                 end
 
@@ -2195,7 +1662,6 @@ task.spawn(function()
                 RenderState.Ready = false
                 BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
 
-                -- Give full time budget on OUR turn, and a ultra-fast 0.12s preview on opponent's turn
                 local budget = isMyTurn and Config.ThinkTimeLimit or 0.12
                 local bestM, altM, ponderM, sc, meta = Engine:AnalyzeApex(calcSide, budget)
 
@@ -2207,15 +1673,8 @@ task.spawn(function()
                     RenderState.Meta = meta
                     RenderState.Ready = Config.ESPEnabled
 
-                    local recentSAN = {}
-                    for p = math.max(1, applied - 3), applied do
-                        if PersistentMovesByPly[p] then
-                            recentSAN[#recentSAN + 1] = PersistentMovesByPly[p]
-                        end
-                    end
-
                     Status.Text = string.format(
-                        "Side: %s | Ply: %d | %s\n#1 Best: %s (%s) [%+.2f]\n#2 Alt: %s | Opp: %s\nSpeed: %s (%d nodes) | %s",
+                        "Side: %s | Ply: %d | %s\n#1 Best: %s (%s) [%+.2f]\n#2 Alt: %s | Opp: %s\nSpeed: %s (%d nodes)",
                         mySide == 1 and "WHITE" or "BLACK",
                         applied,
                         isMyTurn and "YOUR TURN" or "OPP TURN",
@@ -2223,8 +1682,7 @@ task.spawn(function()
                         altM and (altM.san or altM.uci) or "--",
                         ponderM and (ponderM.san or ponderM.uci) or "--",
                         meta,
-                        Engine.Nodes,
-                        #recentSAN > 0 and table.concat(recentSAN, " ") or "Start"
+                        Engine.Nodes
                     )
 
                     Logger.Log("APEX", string.format("Ply %d -> %s (%+.2f) in %s [%d nodes]",
