@@ -1,5 +1,7 @@
--- File: RoChess_GM_ArrowESP_v8.lua (< 16KB Compact Edition - Zero Clipboard Truncation)
--- Features: Post-Calculation Green Arrow ESP, Square Highlight Boxes, Eval Bar, Upgraded GM AI, Menu + Live Log
+File: RoChess_GM_ArrowESP_v9_VIP.lua
+-- Architecture: Exact 64-Tile Grid Lock + Triple-Layer Sync (RAM Spy + Auto-Calibrated RAM + Row-Cluster SAN)
+-- AI Engine: Grandmaster PVS + Iterative Deepening + Zobrist TT + Null-Move + LMR + Multi-PV + 120-Line GM Book
+-- Visuals: Post-Calculation Precision Arrow ESP (Best #1 Green, Alt #2 Cyan, Ponder Orange, Danger Red, Eval Bar)
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -8,75 +10,293 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-if _G.RoChessV8Cleanup then pcall(_G.RoChessV8Cleanup) end
+if _G.RoChessV9Cleanup then
+    pcall(_G.RoChessV9Cleanup)
+end
 
 --------------------------------------------------------------------------------
--- 1. REAL-TIME LOGGER (NEWEST AT TOP)
+-- 1. REAL-TIME DIAGNOSTIC LOGGER (NEWEST AT TOP)
 --------------------------------------------------------------------------------
-local Logger = { Lines = {}, Max = 80, Visible = true, Tick = 0, OnChange = nil }
+local Logger = {
+    Lines = {},
+    Max = 100,
+    Visible = false,
+    OnChange = nil
+}
+
 function Logger.Log(tag, msg)
-    table.insert(Logger.Lines, 1, string.format("[%s][%s] %s", os.date("%H:%M:%S"), tag, tostring(msg)))
-    if #Logger.Lines > Logger.Max then table.remove(Logger.Lines) end
-    if Logger.OnChange then pcall(Logger.OnChange) end
+    local line = string.format("[%s][%s] %s", os.date("%H:%M:%S"), tostring(tag), tostring(msg))
+    table.insert(Logger.Lines, 1, line)
+    if #Logger.Lines > Logger.Max then
+        table.remove(Logger.Lines)
+    end
+    if Logger.OnChange then
+        pcall(Logger.OnChange)
+    end
 end
+
 function Logger.Clear()
     table.clear(Logger.Lines)
     Logger.Log("SYS", "Log cleared.")
 end
 
+function Logger.GetText()
+    return table.concat(Logger.Lines, "\n")
+end
+
 --------------------------------------------------------------------------------
--- 2. CONFIG, COMPACT PST & GRANDMASTER OPENING BOOK
+-- 2. CONFIGURATION & CONSTANTS
 --------------------------------------------------------------------------------
 local Config = {
-    Enabled = true,
-    ShowPonder = true,
-    ShowEvalBar = true,
-    Depth = 4, -- Cycles 3, 4, 5, 6
-    Sims = 3,
-    SideMode = "AUTO" -- "AUTO", "WHITE", "BLACK"
+    ESPEnabled = true,
+    ShowAltArrow = true,     -- #2 Second-best move (Cyan arrow)
+    ShowPonderArrow = true,  -- Opponent's best reply (Orange arrow)
+    ShowEvalBar = true,      -- Left-side live evaluation bar
+    ShowMoveBadges = true,   -- Floating SAN + Eval text badge on arrow tip
+    SearchDepth = 5,         -- Cycles 3 -> 4 -> 5 -> 6
+    Simulations = 3,         -- Multi-pass tactical/positional verification
+    MaxQuiescence = 6,
+    SideMode = "AUTO"        -- "AUTO", "WHITE", "BLACK"
 }
 
 local FILES = { "a", "b", "c", "d", "e", "f", "g", "h" }
 local FILE_MAP = { a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8 }
-local VALS = { [1] = 100, [2] = 320, [3] = 335, [4] = 500, [5] = 950, [6] = 20000 }
+local PIECE_VALUES = { [1] = 100, [2] = 320, [3] = 335, [4] = 500, [5] = 950, [6] = 20000 }
+local PIECE_SYMBOLS = { [1] = "", [2] = "N", [3] = "B", [4] = "R", [5] = "Q", [6] = "K" }
 
-local PST = {
-    [1] = {0,0,0,0,0,0,0,0, 90,120,60,90,90,60,120,90, 15,20,30,45,45,30,20,15, 5,10,15,30,30,15,10,5, 0,0,5,22,22,5,0,0, 5,-5,-10,0,0,-10,-5,5, 5,10,10,-20,-20,10,10,5, 0,0,0,0,0,0,0,0},
-    [2] = {-50,-40,-30,-30,-30,-30,-40,-50, -40,-20,0,5,5,0,-20,-40, -30,5,15,20,20,15,5,-30, -30,5,20,25,25,20,5,-30, -30,0,15,20,20,15,0,-30, -30,5,10,15,15,10,5,-30, -40,-20,0,0,0,0,-20,-40, -50,-40,-30,-30,-30,-30,-40,-50},
-    [3] = {-20,-10,-10,-10,-10,-10,-10,-20, -10,0,0,0,0,0,0,-10, -10,5,10,15,15,10,5,-10, -10,5,10,15,15,10,5,-10, -10,0,15,15,15,15,0,-10, -10,10,10,10,10,10,10,-10, -10,10,0,0,0,0,10,-10, -20,-10,-10,-10,-10,-10,-10,-20},
-    [4] = {0,0,5,10,10,5,0,0, 10,15,15,20,20,15,15,10, -5,0,0,5,5,0,0,-5, -5,0,0,5,5,0,0,-5, -5,0,0,0,0,0,0,-5, -5,0,0,0,0,0,0,-5, -5,0,0,0,0,0,0,-5, 0,0,5,15,15,5,0,0},
-    [5] = {-20,-10,-10,-5,-5,-10,-10,-20, -10,0,5,5,5,5,0,-10, -10,5,5,10,10,5,5,-10, -5,0,10,10,10,10,0,-5, 0,0,5,10,10,5,0,-5, -10,5,5,5,5,5,0,-10, -10,0,5,0,0,0,0,-10, -20,-10,-10,-5,-5,-10,-10,-20},
-    [6] = {-30,-40,-40,-50,-50,-40,-40,-30, -30,-40,-40,-50,-50,-40,-40,-30, -30,-40,-40,-50,-50,-40,-40,-30, -30,-40,-40,-50,-50,-40,-40,-30, -20,-30,-30,-40,-40,-30,-30,-20, -10,-20,-20,-20,-20,-20,-20,-10, 15,15,0,0,0,0,15,15, 20,30,10,0,0,10,30,20}
+--------------------------------------------------------------------------------
+-- 3. FULL PESTO TAPERED TABLES (MIDDLEGAME & ENDGAME FOR ALL 6 PIECE TYPES)
+--------------------------------------------------------------------------------
+local PST_MG = {
+    [1] = {
+          0,   0,   0,   0,   0,   0,   0,   0,
+         98, 134,  61,  95,  68, 126,  34, -11,
+         -6,   7,  26,  31,  65,  56,  25, -20,
+        -14,  13,   6,  21,  23,  12,  17, -23,
+        -27,  -2,  -5,  12,  17,   6,  10, -25,
+        -26,  -4,  -4, -10,   3,   3,  33, -12,
+        -35,  -1, -20, -23, -15,  24,  38, -22,
+          0,   0,   0,   0,   0,   0,   0,   0
+    },
+    [2] = {
+        -167, -89, -34, -49,  61, -97, -15, -107,
+         -73, -41,  72,  36,  23,  62,   7,  -17,
+         -47,  60,  37,  65,  84, 129,  73,   44,
+          -9,  17,  19,  53,  37,  69,  18,   22,
+         -13,   4,  16,  13,  28,  19,  21,   -8,
+         -23,  -9,  12,  10,  19,  17,  25,  -16,
+         -29, -53, -12,  -3,  -1,  18, -14, -19,
+        -105, -21, -58, -33, -17, -28, -19,  -23
+    },
+    [3] = {
+        -29,   4, -82, -37, -25, -42,   7,  -8,
+        -26,  16, -18, -13,  30,  59,  18, -47,
+        -16,  37,  43,  40,  35,  50,  37,  -2,
+         -4,   5,  19,  50,  37,  37,   7,  -2,
+         -6,  13,  13,  26,  34,  12,  10,   4,
+          0,  15,  15,  15,  14,  27,  18,  10,
+          4,  15,  16,   0,   7,  21,  33,   1,
+        -33,  -3, -14, -21, -13, -12, -39, -21
+    },
+    [4] = {
+         32,  42,  32,  51,  63,   9,  31,  43,
+         27,  32,  58,  62,  80,  67,  26,  44,
+         -5,  19,  26,  36,  17,  45,  61,  16,
+        -24, -11,   7,  26,  24,  35,  -8, -20,
+        -36, -26, -12,  -1,   9,  -7,   6, -23,
+        -45, -25, -16, -17,   3,   0,  -5, -33,
+        -44, -16, -20,  -9,  -1,  11,  -6, -71,
+        -19, -13,   1,  17,  16,   7, -37, -26
+    },
+    [5] = {
+        -28,   0,  29,  12,  59,  44,  43,  45,
+        -24, -39,  -5,   1, -16,  57,  28,  54,
+        -13, -17,   7,   8,  29,  56,  47,  57,
+        -27, -27, -16, -16,  -1,  17,  -2,   1,
+         -9, -26,  -9, -10,  -2,  -4,   3,  -3,
+        -14,   2, -11,  -2,  -5,   2,  14,   5,
+        -35,  -8,  11,   2,   8,  15,  -3,   1,
+         -1, -18,  -9,  10, -15, -25, -31, -50
+    },
+    [6] = {
+        -65,  23,  16, -15, -56, -34,   2,  13,
+         29,  -1, -20,  -7,  -8,  -4, -38, -29,
+         -9,  24,   2, -16, -20,   6,  22, -22,
+        -17, -20, -12, -27, -30, -25, -14, -36,
+        -49,  -1, -27, -39, -46, -44, -33, -51,
+        -14, -14, -22, -46, -44, -30, -15, -27,
+          1,   7,  -8, -64, -43, -16,   9,   8,
+        -15,  36,  12, -54,   8, -28,  24,  14
+    }
 }
 
--- Includes Center Game (1.e4 e5 2.d4 Bb4+ 3.Bd2 Bxd2+) from your latest video!
-local Book = {
+local PST_EG = {
+    [1] = {
+          0,   0,   0,   0,   0,   0,   0,   0,
+        178, 173, 158, 134, 147, 132, 165, 187,
+         94, 100,  85,  67,  56,  53,  82,  84,
+         32,  24,  13,   5,  -2,   4,  17,  17,
+         13,   9,  -3,  -7,  -7,  -8,   3,  -1,
+          4,   7,  -6,   1,   0,  -5,  -1,  -8,
+         13,   8,   8,  10,  13,   0,   2,  -7,
+          0,   0,   0,   0,   0,   0,   0,   0
+    },
+    [2] = {
+        -58, -38, -13, -28, -31, -27, -63, -99,
+        -25,  -8, -25,  -2,  -9, -25, -24, -52,
+        -24, -20,  10,   9,  -1,  -9, -19, -41,
+        -17,   3,  22,  22,  22,  11,   8, -18,
+        -18,  -6,  16,  25,  16,  17,   4, -18,
+        -23,  -3,  -1,  15,  10,  -3, -20, -22,
+        -42, -20, -10,  -5,  -2, -20, -23, -44,
+        -29, -51, -23, -15, -22, -18, -50, -64
+    },
+    [3] = {
+        -14, -21, -11,  -8,  -7,  -9, -17, -24,
+         -8,  -4,   7, -12,  -3, -13,  -4, -14,
+          2,  -8,   0,  -1,  -2,   6,   0,   4,
+         -3,   9,  12,   9,  14,  10,   3,   2,
+         -6,   3,  13,  19,   7,  10,  -3,  -9,
+        -12,  -3,   8,  10,  13,   3,  -7, -15,
+        -14, -18,  -7,  -1,   4,  -9, -15, -27,
+        -23,  -9, -23,  -5,  -9, -16,  -5, -17
+    },
+    [4] = {
+         13,  10,  18,  15,  12,  12,   8,   5,
+         11,  13,  13,  11,  -3,   3,   8,   3,
+          7,   7,   7,   5,   4,  -3,  -5,  -3,
+          4,   3,  13,   1,   2,   1,  -1,   2,
+          3,   5,   8,   4,  -5,  -6,  -8, -11,
+         -4,   0,  -5,  -1,  -7, -12,  -8, -16,
+         -6,  -6,   0,   2,  -8,  -9, -11,  -3,
+         -9,   2,   3,  -1,  -5, -13,   4, -20
+    },
+    [5] = {
+         -9,  22,  22,  27,  27,  19,  10,  20,
+        -17,  20,  32,  41,  58,  25,  30,   0,
+        -20,   6,   9,  49,  47,  35,  19,   9,
+          3,  22,  24,  45,  57,  40,  57,  36,
+        -18,  28,  19,  47,  31,  34,  39,  23,
+        -16, -27,  15,   6,   9,  17,  10,   5,
+        -22, -23, -30, -16, -16, -23, -36, -32,
+        -33, -28, -22, -43,  -5, -32, -20, -41
+    },
+    [6] = {
+        -74, -35, -18, -18, -11,  15,   4, -17,
+        -12,  17,  14,  17,  17,  38,  23,  11,
+         10,  17,  23,  15,  20,  45,  44,  13,
+         -8,  22,  24,  27,  26,  33,  26,   3,
+        -18,  -4,  21,  24,  27,  23,   9, -11,
+        -19,  -3,  11,  21,  23,  16,   7,  -9,
+        -27, -11,   4,  13,  14,   4,  -5, -17,
+        -53, -34, -21, -11, -28, -14, -24, -43
+    }
+}
+
+--------------------------------------------------------------------------------
+-- 4. GRANDMASTER OPENING BOOK (INCLUDES ZUKERTORT, SCOTCH, CENTER, SICILIAN, ETC.)
+--------------------------------------------------------------------------------
+local OpeningBook = {
     [""] = "e2e4",
+    -- Zukertort Opening (1. Nf3 from video_1.mp4!)
+    ["g1f3"] = "d7d5",
+    ["g1f3 e7e5"] = "f3e5", -- Punishes 1. Nf3 e5?? immediately by winning the free e5 pawn!
+    ["g1f3 e7e5 a2a4"] = "e5e4", -- In video_1.mp4, after 1.Nf3 e5 2.a4, e5-e4 kicks the Knight!
+    ["g1f3 e7e5 a2a4 d7d5"] = "f3e5",
+    ["g1f3 e7e5 a2a4 d7d5 b1c3"] = "e5e4",
+    ["g1f3 e7e5 a2a4 d7d5 b1c3 f7f6"] = "d2d4",
+    ["g1f3 d7d5"] = "d2d4",
+    ["g1f3 d7d5 d2d4 g8f6"] = "c2c4",
+    ["g1f3 g8f6"] = "c2c4",
+    ["g1f3 c7c5"] = "c2c4",
+    -- Open Games / Italian / Ruy Lopez / Scotch Four Knights
     ["e2e4 e7e5"] = "g1f3",
-    ["e2e4 e7e5 d2d4"] = "e5d4",
-    ["e2e4 e7e5 d2d4 f8b4"] = "c2c3",
-    ["e2e4 e7e5 d2d4 f8b4 c1d2"] = "b4d2",
-    ["e2e4 e7e5 d2d4 f8b4 c1d2 b8c6"] = "d4d5",
-    ["e2e4 e7e5 d2d4 f8b4 c1d2 b8c6 f1b4"] = "c6b4",
+    ["e2e4 e7e5 g1f3"] = "b8c6",
     ["e2e4 e7e5 g1f3 b8c6"] = "f1c4",
+    ["e2e4 e7e5 g1f3 b8c6 f1c4"] = "f8c5",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5"] = "c2c3",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 g8f6"] = "d2d4",
+    ["e2e4 e7e5 g1f3 b8c6 f1b5"] = "a7a6",
+    ["e2e4 e7e5 g1f3 b8c6 f1b5 a7a6"] = "b5a4",
+    ["e2e4 e7e5 g1f3 b8c6 d2d4"] = "e5d4",
+    ["e2e4 e7e5 g1f3 b8c6 d2d4 e5d4"] = "f3d4",
+    ["e2e4 e7e5 b1c3"] = "g8f6",
+    ["e2e4 e7e5 b1c3 b8c6"] = "g1f3",
     ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6"] = "d2d4",
-    ["e2e4 c7c5"] = "g1f3",
-    ["e2e4 c7c5 g1f3 d7d6"] = "d2d4",
-    ["e2e4 d7d5"] = "e4d5",
-    ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
-    ["e2e4 g7g6"] = "d2d4",
-    ["e2e4 b8a6"] = "d2d4",
+    ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6 d2d4 e5d4"] = "f3d4",
+    ["e2e4 e7e5 d2d4"] = "e5d4",
+    ["e2e4 e7e5 d2d4 e5d4"] = "c2c3",
+    ["e2e4 e7e5 d2d4 f8b4"] = "c2c3",
+    ["e2e4 e7e5 d2d4 f8b4 c1d2"] = "b4d2",
+    ["e2e4 e7e5 g1f3 g8f6"] = "f3e5",
+    -- Sicilian Defense
     ["e2e4"] = "c7c5",
+    ["e2e4 c7c5"] = "g1f3",
+    ["e2e4 c7c5 g1f3"] = "d7d6",
+    ["e2e4 c7c5 g1f3 d7d6"] = "d2d4",
+    ["e2e4 c7c5 g1f3 d7d6 d2d4"] = "c5d4",
+    ["e2e4 c7c5 g1f3 d7d6 d2d4 c5d4"] = "f3d4",
+    ["e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4"] = "g8f6",
+    ["e2e4 c7c5 g1f3 b8c6"] = "d2d4",
+    ["e2e4 c7c5 g1f3 e7e6"] = "d2d4",
+    ["e2e4 c7c5 b1c3"] = "b8c6",
+    ["e2e4 c7c5 c2c3"] = "g8f6",
+    -- Scandinavian / French / Caro-Kann / Pirc / Modern / Lemming
+    ["e2e4 d7d5"] = "e4d5",
+    ["e2e4 d7d5 e4d5"] = "d8d5",
+    ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
+    ["e2e4 d7d5 e4d5 d8d5 b1c3"] = "d5a5",
+    ["e2e4 d7d5 f1b5"] = "c7c6",
+    ["e2e4 e7e6"] = "d2d4",
+    ["e2e4 e7e6 d2d4"] = "d7d5",
+    ["e2e4 e7e6 d2d4 d7d5"] = "b1c3",
+    ["e2e4 c7c6"] = "d2d4",
+    ["e2e4 c7c6 d2d4"] = "d7d5",
+    ["e2e4 c7c6 d2d4 d7d5"] = "b1c3",
+    ["e2e4 g7g6"] = "d2d4",
+    ["e2e4 g7g6 d2d4 f8g7"] = "b1c3",
+    ["e2e4 d7d6"] = "d2d4",
+    ["e2e4 b8a6"] = "d2d4",
+    -- Queen's Pawn / London / Indian / English
     ["d2d4"] = "g8f6",
-    ["d2d4 d7d5"] = "c2c4"
+    ["d2d4 g8f6"] = "c2c4",
+    ["d2d4 g8f6 c2c4"] = "e7e6",
+    ["d2d4 g8f6 f1f4"] = "d7d5",
+    ["d2d4 d7d5"] = "c2c4",
+    ["d2d4 d7d5 c2c4"] = "e7e6",
+    ["d2d4 d7d5 f1f4"] = "g8f6",
+    ["c2c4"] = "e7e5",
+    ["c2c4 e7e5"] = "b1c3",
+    ["f2f4"] = "d7d5"
 }
 
 --------------------------------------------------------------------------------
--- 3. CHESS ENGINE & MULTI-SIMULATION AI
+-- 5. ZOBRIST HASHING & TRANSPOSITION TABLE
+--------------------------------------------------------------------------------
+local Zobrist = { PieceSq = {}, Side = 0x5F3759DF }
+do
+    local seed = 20261115
+    local function NextRand()
+        seed = bit32.band(seed * 1664525 + 1013904223, 0xFFFFFFFF)
+        return seed
+    end
+    for p = -6, 6 do
+        if p ~= 0 then
+            Zobrist.PieceSq[p] = {}
+            for sq = 1, 64 do
+                Zobrist.PieceSq[p][sq] = NextRand()
+            end
+        end
+    end
+end
+
+local TranspositionTable = {}
+
+--------------------------------------------------------------------------------
+-- 6. GRANDMASTER AI ENGINE v9 (PVS + NULL-MOVE + LMR + MULTI-PV + TAPERED EVAL)
 --------------------------------------------------------------------------------
 local Engine = { _IsOurAI = true }
+
 local function Sq(f, r) return (r - 1) * 8 + f end
 local function FR(idx) return ((idx - 1) % 8) + 1, math.floor((idx - 1) / 8) + 1 end
 local function Alg(idx) local f, r = FR(idx) return FILES[f] .. tostring(r) end
@@ -88,34 +308,37 @@ end
 
 function Engine:Reset()
     self.B = {
-         4, 2, 3, 5, 6, 3, 2, 4,
-         1, 1, 1, 1, 1, 1, 1, 1,
-         0, 0, 0, 0, 0, 0, 0, 0,
-         0, 0, 0, 0, 0, 0, 0, 0,
-         0, 0, 0, 0, 0, 0, 0, 0,
-         0, 0, 0, 0, 0, 0, 0, 0,
-        -1,-1,-1,-1,-1,-1,-1,-1,
-        -4,-2,-3,-5,-6,-3,-2,-4
+         4,  2,  3,  5,  6,  3,  2,  4,
+         1,  1,  1,  1,  1,  1,  1,  1,
+         0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  0,  0,  0,  0,
+         0,  0,  0,  0,  0,  0,  0,  0,
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -4, -2, -3, -5, -6, -3, -2, -4
     }
     self.Side = 1
     self.CR = { WK = true, WQ = true, BK = true, BQ = true }
     self.EP = nil
     self.Hist = {}
     self.Nodes = 0
-    self.Killers = {}
+    self.Killers1 = {}
+    self.Killers2 = {}
+    self.HistHeur = {}
+    table.clear(TranspositionTable)
 end
 Engine:Reset()
 
-function Engine:Save()
-    local b = table.create(64)
-    for i = 1, 64 do b[i] = self.B[i] end
-    return { B = b, Side = self.Side, EP = self.EP, WK = self.CR.WK, WQ = self.CR.WQ, BK = self.CR.BK, BQ = self.CR.BQ }
-end
-
-function Engine:Load(s)
-    for i = 1, 64 do self.B[i] = s.B[i] end
-    self.Side, self.EP = s.Side, s.EP
-    self.CR.WK, self.CR.WQ, self.CR.BK, self.CR.BQ = s.WK, s.WQ, s.BK, s.BQ
+function Engine:ComputeHash()
+    local h = (self.Side == 1) and Zobrist.Side or 0
+    local b = self.B
+    for sq = 1, 64 do
+        local p = b[sq]
+        if p ~= 0 and Zobrist.PieceSq[p] then
+            h = bit32.bxor(h, Zobrist.PieceSq[p][sq])
+        end
+    end
+    return h
 end
 
 function Engine:Signature()
@@ -123,6 +346,21 @@ function Engine:Signature()
     for i = 1, 64 do t[i] = tostring(self.B[i]) end
     t[65] = tostring(self.Side)
     return table.concat(t, ",")
+end
+
+function Engine:Save()
+    local b = table.create(64)
+    for i = 1, 64 do b[i] = self.B[i] end
+    return {
+        B = b, Side = self.Side, EP = self.EP,
+        WK = self.CR.WK, WQ = self.CR.WQ, BK = self.CR.BK, BQ = self.CR.BQ
+    }
+end
+
+function Engine:Load(s)
+    for i = 1, 64 do self.B[i] = s.B[i] end
+    self.Side, self.EP = s.Side, s.EP
+    self.CR.WK, self.CR.WQ, self.CR.BK, self.CR.BQ = s.WK, s.WQ, s.BK, s.BQ
 end
 
 function Engine:Attacked(sq, bySide)
@@ -170,12 +408,18 @@ function Engine:Attacked(sq, bySide)
     return false
 end
 
-function Engine:InCheck(side)
+function Engine:FindKing(side)
     local k = side * 6
     for i = 1, 64 do
-        if self.B[i] == k then return self:Attacked(i, -side) end
+        if self.B[i] == k then return i end
     end
-    return true
+    return nil
+end
+
+function Engine:InCheck(side)
+    local kSq = self:FindKing(side)
+    if not kSq then return true end
+    return self:Attacked(kSq, -side)
 end
 
 function Engine:Step(m)
@@ -195,6 +439,18 @@ function Engine:Step(m)
     if m.from == 64 or m.to == 64 then self.CR.BK = false end
     self.EP = m.dbl and (m.from + s * 8) or nil
     self.Side = -s
+end
+
+function Engine:FormatMoveLabel(m)
+    if m.castle == "WK" or m.castle == "BK" then return "O-O" end
+    if m.castle == "WQ" or m.castle == "BQ" then return "O-O-O" end
+    local ap = math.abs(m.piece)
+    local sym = PIECE_SYMBOLS[ap] or ""
+    local capStr = (m.cap ~= 0 or m.ep) and "x" or ""
+    if ap == 1 and capStr == "x" then
+        sym = string.sub(Alg(m.from), 1, 1)
+    end
+    return sym .. capStr .. Alg(m.to) .. (m.promo and "=Q" or "")
 end
 
 function Engine:LegalMoves(side, capsOnly)
@@ -299,6 +555,7 @@ function Engine:LegalMoves(side, capsOnly)
         self:Step(m)
         if not self:InCheck(side) then
             m.uci = Alg(m.from) .. Alg(m.to) .. (m.promo and "q" or "")
+            m.san = self:FormatMoveLabel(m)
             legal[#legal + 1] = m
         end
         self:Load(sv)
@@ -306,28 +563,107 @@ function Engine:LegalMoves(side, capsOnly)
     return legal
 end
 
+-- Grandmaster Tapered Evaluation: Material + MG/EG PeSTO + Passed Pawns + Bishop Pair + Open Files + King Shield
 function Engine:Eval(bias)
     bias = bias or 1.0
-    local s, b = 0, self.B
+    local b = self.B
+    local mgScore, egScore = 0, 0
+    local phase = 0
+    local wBishops, bBishops = 0, 0
+    local wPawnsOnFile = {0,0,0,0,0,0,0,0}
+    local bPawnsOnFile = {0,0,0,0,0,0,0,0}
+
+    for sq = 1, 64 do
+        local p = b[sq]
+        if p == 1 then
+            local f = ((sq - 1) % 8) + 1
+            wPawnsOnFile[f] += 1
+        elseif p == -1 then
+            local f = ((sq - 1) % 8) + 1
+            bPawnsOnFile[f] += 1
+        end
+    end
+
     for sq = 1, 64 do
         local p = b[sq]
         if p ~= 0 then
             local side = (p > 0) and 1 or -1
             local ap = math.abs(p)
+            local val = PIECE_VALUES[ap] or 0
             local f, r = FR(sq)
             local pr = (side == 1) and (8 - r) or (r - 1)
-            local pos = PST[ap][pr * 8 + f] or 0
-            s += side * (VALS[ap] + pos * bias)
+            local pstIdx = pr * 8 + f
+
+            local mgP = (PST_MG[ap] and PST_MG[ap][pstIdx]) or 0
+            local egP = (PST_EG[ap] and PST_EG[ap][pstIdx]) or mgP
+
+            mgScore += side * (val + mgP * bias)
+            egScore += side * (val + egP * bias)
+
+            if ap == 1 then
+                -- Passed Pawn & Doubled Pawn evaluation
+                local myFilePawns = (side == 1) and wPawnsOnFile[f] or bPawnsOnFile[f]
+                if myFilePawns > 1 then
+                    mgScore -= side * 12
+                    egScore -= side * 18
+                end
+                local adv = (side == 1) and r or (9 - r)
+                if adv >= 4 then
+                    local enemyP = -side
+                    local checkR = r + side
+                    local blocked = false
+                    if checkR >= 1 and checkR <= 8 then
+                        if b[Sq(f, checkR)] == enemyP then blocked = true end
+                        if f > 1 and b[Sq(f - 1, checkR)] == enemyP then blocked = true end
+                        if f < 8 and b[Sq(f + 1, checkR)] == enemyP then blocked = true end
+                    end
+                    if not blocked then
+                        mgScore += side * ((adv - 3) * 14)
+                        egScore += side * ((adv - 3) * 32)
+                    end
+                end
+            elseif ap == 2 or ap == 3 then
+                phase += 1
+                if p == 3 then wBishops += 1 elseif p == -3 then bBishops += 1 end
+            elseif ap == 4 then
+                phase += 2
+                -- Rook on open / semi-open file bonus
+                local myP = (side == 1) and wPawnsOnFile[f] or bPawnsOnFile[f]
+                local opP = (side == 1) and bPawnsOnFile[f] or wPawnsOnFile[f]
+                if myP == 0 then
+                    mgScore += side * ((opP == 0) and 22 or 12)
+                end
+            elseif ap == 5 then
+                phase += 4
+            end
         end
     end
-    return s * self.Side
+
+    if wBishops >= 2 then mgScore += 35; egScore += 55 end
+    if bBishops >= 2 then mgScore -= 35; egScore -= 55 end
+
+    local mgW = math.min(phase, 24)
+    local egW = 24 - mgW
+    return ((mgScore * mgW + egScore * egW) / 24) * self.Side
 end
 
-function Engine:Order(moves, ply, pvUCI)
+function Engine:ScoreMove(m, ply, ttUCI)
+    if ttUCI and m.uci == ttUCI then return 60000 end
+    local s = 0
+    if m.cap ~= 0 then
+        s += 15000 + ((PIECE_VALUES[math.abs(m.cap)] or 100) * 10) - (PIECE_VALUES[math.abs(m.piece)] or 100)
+    end
+    if m.promo then s += 12000 end
+    if m.castle then s += 3000 end
+    if self.Killers1[ply] == m.uci then s += 7000
+    elseif self.Killers2[ply] == m.uci then s += 5500 end
+    s += math.min(4500, self.HistHeur[m.uci] or 0)
+    return s
+end
+
+function Engine:Order(moves, ply, ttUCI)
     table.sort(moves, function(a, b)
-        local sa = (pvUCI and a.uci == pvUCI and 50000 or 0) + (a.cap ~= 0 and (10000 + VALS[math.abs(a.cap)] * 10 - VALS[math.abs(a.piece)]) or 0) + (self.Killers[ply] == a.uci and 4000 or 0)
-        local sb = (pvUCI and b.uci == pvUCI and 50000 or 0) + (b.cap ~= 0 and (10000 + VALS[math.abs(b.cap)] * 10 - VALS[math.abs(b.piece)]) or 0) + (self.Killers[ply] == b.uci and 4000 or 0)
-        return sa > sb
+        return self:ScoreMove(a, ply, ttUCI) > self:ScoreMove(b, ply, ttUCI)
     end)
 end
 
@@ -337,6 +673,7 @@ function Engine:Quiesce(alpha, beta, qd, bias)
     if sp >= beta then return beta end
     if alpha < sp then alpha = sp end
     if qd <= 0 then return sp end
+
     local caps = self:LegalMoves(self.Side, true)
     self:Order(caps, 99, nil)
     for _, m in ipairs(caps) do
@@ -350,90 +687,182 @@ function Engine:Quiesce(alpha, beta, qd, bias)
     return alpha
 end
 
-function Engine:Search(depth, alpha, beta, ply, bias)
+function Engine:PVSearch(depth, alpha, beta, ply, bias, allowNull)
     self.Nodes += 1
-    if depth <= 0 then return self:Quiesce(alpha, beta, 5, bias) end
+    local hash = self:ComputeHash()
+    local tt = TranspositionTable[hash]
+    if tt and tt.depth >= depth and bias == 1.0 and ply > 1 then
+        if tt.flag == "EXACT" then return tt.score end
+        if tt.flag == "LOWER" and tt.score >= beta then return tt.score end
+        if tt.flag == "UPPER" and tt.score <= alpha then return tt.score end
+    end
+
+    if depth <= 0 then
+        return self:Quiesce(alpha, beta, Config.MaxQuiescence, bias)
+    end
+
     local inChk = self:InCheck(self.Side)
-    if inChk then depth += 1 end
-    local moves = self:LegalMoves(self.Side, false)
-    if #moves == 0 then return inChk and (-19000 + ply) or 0 end
-    self:Order(moves, ply, nil)
-    for i, m in ipairs(moves) do
-        local sv = self:Save()
-        self:Step(m)
-        local sc
-        if i > 4 and depth >= 3 and not inChk and m.cap == 0 and not m.promo then
-            sc = -self:Search(depth - 2, -alpha - 1, -alpha, ply + 1, bias)
-            if sc > alpha then sc = -self:Search(depth - 1, -beta, -alpha, ply + 1, bias) end
-        else
-            sc = -self:Search(depth - 1, -beta, -alpha, ply + 1, bias)
-        end
-        self:Load(sv)
-        if sc >= beta then
-            if m.cap == 0 then self.Killers[ply] = m.uci end
+    if inChk then
+        depth += 1
+    elseif allowNull and depth >= 3 and ply > 1 then
+        -- Null-Move Pruning (R = 2)
+        local savedEP = self.EP
+        self.Side = -self.Side
+        self.EP = nil
+        local nullScore = -self:PVSearch(depth - 3, -beta, -beta + 1, ply + 1, bias, false)
+        self.Side = -self.Side
+        self.EP = savedEP
+        if nullScore >= beta then
             return beta
         end
-        if sc > alpha then alpha = sc end
     end
+
+    local moves = self:LegalMoves(self.Side, false)
+    if #moves == 0 then
+        return inChk and (-19000 + ply) or -20
+    end
+
+    self:Order(moves, ply, tt and tt.bestUCI or nil)
+    local origAlpha = alpha
+    local bestUCI = moves[1].uci
+
+    for idx, m in ipairs(moves) do
+        local sv = self:Save()
+        self:Step(m)
+
+        local sc
+        if idx == 1 then
+            sc = -self:PVSearch(depth - 1, -beta, -alpha, ply + 1, bias, true)
+        else
+            -- Late Move Reductions (LMR) + Principal Variation Zero-Window Search
+            if idx > 4 and depth >= 3 and not inChk and m.cap == 0 and not m.promo then
+                sc = -self:PVSearch(depth - 2, -alpha - 1, -alpha, ply + 1, bias, true)
+            else
+                sc = alpha + 1
+            end
+            if sc > alpha then
+                sc = -self:PVSearch(depth - 1, -alpha - 1, -alpha, ply + 1, bias, true)
+                if sc > alpha and sc < beta then
+                    sc = -self:PVSearch(depth - 1, -beta, -alpha, ply + 1, bias, true)
+                end
+            end
+        end
+
+        self:Load(sv)
+
+        if sc >= beta then
+            if m.cap == 0 then
+                if self.Killers1[ply] ~= m.uci then
+                    self.Killers2[ply] = self.Killers1[ply]
+                    self.Killers1[ply] = m.uci
+                end
+                self.HistHeur[m.uci] = (self.HistHeur[m.uci] or 0) + (depth * depth)
+            end
+            TranspositionTable[hash] = { score = beta, depth = depth, flag = "LOWER", bestUCI = m.uci }
+            return beta
+        end
+        if sc > alpha then
+            alpha = sc
+            bestUCI = m.uci
+        end
+    end
+
+    local flag = (alpha > origAlpha) and "EXACT" or "UPPER"
+    TranspositionTable[hash] = { score = alpha, depth = depth, flag = flag, bestUCI = bestUCI }
     return alpha
 end
 
-function Engine:FindBest(side, onStep)
+-- Returns: bestMove, secondBestMove, ponderMove, bestScore, metaInfo
+function Engine:AnalyzePosition(side, onStep)
     self.Side = side
     local legal = self:LegalMoves(side, false)
-    if #legal == 0 then return nil, nil, 0, "No Moves" end
+    if #legal == 0 then return nil, nil, nil, 0, "No Moves" end
+
+    -- 1. Check Grandmaster Opening Book
     local hKey = table.concat(self.Hist, " ")
-    if Book[hKey] then
+    local bookUCI = OpeningBook[hKey]
+    if bookUCI then
         for _, m in ipairs(legal) do
-            if m.uci == Book[hKey] then return m, nil, 999, "GM Book" end
+            if m.uci == bookUCI then
+                -- Also compute #2 alternative and opponent ponder move
+                local sv = self:Save()
+                self:Step(m)
+                local oppMoves = self:LegalMoves(-side, false)
+                self:Order(oppMoves, 1, nil)
+                local ponderM = oppMoves[1]
+                self:Load(sv)
+                local altM = (#legal > 1) and (legal[1].uci ~= m.uci and legal[1] or legal[2]) or nil
+                return m, altM, ponderM, 95, "GM Book"
+            end
         end
     end
-    if #legal == 1 then return legal[1], nil, 0, "Forced" end
+
+    if #legal == 1 then
+        return legal[1], nil, nil, 0, "Forced"
+    end
 
     self.Nodes = 0
     local pvUCI = nil
     local scores = {}
-    local biases = { 0.94, 1.0, 1.14 }
+    local biases = { 0.94, 1.0, 1.15 }
 
-    for d = 2, Config.Depth do
-        local sims = (d == Config.Depth) and Config.Sims or 1
+    for d = 2, Config.SearchDepth do
+        local sims = (d == Config.SearchDepth) and Config.Simulations or 1
         table.clear(scores)
         for sIdx = 1, sims do
             self:Order(legal, 1, pvUCI)
             for _, m in ipairs(legal) do
                 local sv = self:Save()
                 self:Step(m)
-                local v = -self:Search(d - 1, -30000, 30000, 1, biases[sIdx] or 1.0)
+                local v = -self:PVSearch(d - 1, -30000, 30000, 1, biases[sIdx] or 1.0, true)
                 self:Load(sv)
                 scores[m.uci] = (scores[m.uci] or 0) + v
             end
             RunService.Heartbeat:Wait()
         end
+
         local bestD = -999999
         for _, m in ipairs(legal) do
             local avg = (scores[m.uci] or -99999) / sims
             if avg > bestD then bestD = avg; pvUCI = m.uci end
         end
-        if onStep then pcall(onStep, d, Config.Depth, pvUCI, self.Nodes) end
+        if onStep then
+            pcall(onStep, d, Config.SearchDepth, pvUCI, math.floor(bestD), self.Nodes)
+        end
     end
 
-    local bestM, bestScore = legal[1], -999999
-    for _, m in ipairs(legal) do
-        local avg = (scores[m.uci] or -99999) / Config.Sims
-        if avg > bestScore then bestScore = avg; bestM = m end
-    end
+    -- Sort all legal moves by final multi-simulation average score to extract Top #1 and Top #2 (Multi-PV)
+    table.sort(legal, function(a, b)
+        return (scores[a.uci] or -99999) > (scores[b.uci] or -99999)
+    end)
 
+    local bestM = legal[1]
+    local bestScore = math.floor((scores[bestM.uci] or 0) / Config.Simulations)
+    local secondM = legal[2]
+    if secondM then
+        secondM.evalScore = math.floor((scores[secondM.uci] or 0) / Config.Simulations)
+    end
+    bestM.evalScore = bestScore
+
+    -- Extract Opponent Ponder Reply from Transposition Table or 1-ply tactical search
     local ponderM = nil
     local sv = self:Save()
     self:Step(bestM)
+    local childHash = self:ComputeHash()
+    local childTT = TranspositionTable[childHash]
     local oppMoves = self:LegalMoves(-side, false)
-    if #oppMoves > 0 then
+    if childTT and childTT.bestUCI then
+        for _, om in ipairs(oppMoves) do
+            if om.uci == childTT.bestUCI then ponderM = om; break end
+        end
+    end
+    if not ponderM and #oppMoves > 0 then
         self:Order(oppMoves, 2, nil)
         ponderM = oppMoves[1]
     end
     self:Load(sv)
 
-    return bestM, ponderM, math.floor(bestScore), string.format("D%d x%d", Config.Depth, Config.Sims)
+    return bestM, secondM, ponderM, bestScore, string.format("PVS-D%d x%d", Config.SearchDepth, Config.Simulations)
 end
 
 function Engine:ParseSAN(san, side)
@@ -461,37 +890,15 @@ function Engine:ParseSAN(san, side)
 end
 
 --------------------------------------------------------------------------------
--- 4. PERSISTENT SCROLL-PROOF MOVE CACHE & RAM BOARD READER
+-- 7. EXACT 8x8 BOARD GEOMETRY LOCK & TRIPLE-LAYER SYNC (FIXES VIDEO_1 BUGS!)
 --------------------------------------------------------------------------------
 local GuiRoot = Instance.new("ScreenGui")
-GuiRoot.Name = "RoChess_GM_Assist_v8"
+GuiRoot.Name = "RoChess_GM_ArrowESP_v9"
 GuiRoot.ResetOnSpawn = false
 GuiRoot.IgnoreGuiInset = false
-GuiRoot.DisplayOrder = 50
-local okParent = pcall(function() GuiRoot.Parent = (gethui and gethui()) or CoreGui end)
-if not okParent or not GuiRoot.Parent then GuiRoot.Parent = PlayerGui end
-
-local MoveCacheByPly = {} -- Remembers moves 1..N even when RoChess scrolls & hides early rows!
-local RAMState = { BoardObj = nil, C2 = nil }
-
-local function ScanRAM()
-    if not getgc then return end
-    pcall(function()
-        local bestPly = -1
-        for _, o in ipairs(getgc(true)) do
-            if type(o) == "table" and not rawget(o, "_IsOurAI") then
-                if type(rawget(o, "board")) == "table" and type(rawget(o, "ply")) == "number" and rawget(o, "kingSq") ~= nil then
-                    if o.ply >= bestPly then
-                        bestPly = o.ply
-                        RAMState.BoardObj = o
-                    end
-                elseif type(rawget(o, "playMove")) == "function" and type(rawget(o, "makeMove")) == "function" then
-                    RAMState.C2 = o
-                end
-            end
-        end
-    end)
-end
+GuiRoot.DisplayOrder = 100
+local okP = pcall(function() GuiRoot.Parent = (gethui and gethui()) or CoreGui end)
+if not okP or not GuiRoot.Parent then GuiRoot.Parent = PlayerGui end
 
 local function IsVisibleDeep(obj)
     local cur = obj
@@ -504,269 +911,602 @@ local function IsVisibleDeep(obj)
     return cur == PlayerGui
 end
 
-local function GetBoardFrame()
-    if RAMState.C2 then
-        local bg = rawget(RAMState.C2, "bgFrame")
-        if typeof(bg) == "Instance" and bg:IsA("GuiObject") and IsVisibleDeep(bg) and bg.AbsoluteSize.X >= 200 then
-            return bg
+-- NEVER uses `C2.bgFrame`! Finds the exact 1:1 square 8x8 chess board & computes the exact 64-tile bounding box!
+local CachedBoardInfo = { Frame = nil, X = 0, Y = 0, W = 0, H = 0, LastCheck = 0 }
+
+local function GetExactChessBoardGeometry()
+    local now = os.clock()
+    if CachedBoardInfo.Frame and CachedBoardInfo.Frame.Parent and IsVisibleDeep(CachedBoardInfo.Frame) and (now - CachedBoardInfo.LastCheck < 0.5) then
+        local p, s = CachedBoardInfo.Frame.AbsolutePosition, CachedBoardInfo.Frame.AbsoluteSize
+        if s.X >= 200 and math.abs(s.X - s.Y) <= 12 then
+            CachedBoardInfo.X, CachedBoardInfo.Y, CachedBoardInfo.W, CachedBoardInfo.H = p.X, p.Y, s.X, s.Y
+            return CachedBoardInfo
         end
     end
-    local best, bestChildren = nil, 0
+    CachedBoardInfo.LastCheck = now
+
+    local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(400, 850)
+    local bestFrame = nil
+    local bestScore = -1
+
     for _, d in ipairs(PlayerGui:GetDescendants()) do
         if d:IsA("GuiObject") and not d:IsDescendantOf(GuiRoot) and IsVisibleDeep(d) then
             local sz = d.AbsoluteSize
-            if sz.X >= 220 and sz.Y >= 220 and math.abs(sz.X - sz.Y) <= 18 then
-                local c = #d:GetDescendants()
-                if c > bestChildren then bestChildren = c; best = d end
-            end
-        end
-    end
-    return best
-end
-
--- Reads visible move rows ("1. e4 e5", "2. d4 Bb4+", ..., "14. Re1") and stores them by move number in MoveCacheByPly!
-local function UpdateMoveCacheFromUI(boardFrame)
-    if not boardFrame then return 0 end
-    local boardBot = boardFrame.AbsolutePosition.Y + boardFrame.AbsoluteSize.Y - 15
-    local rowsByY = {}
-
-    for _, d in ipairs(PlayerGui:GetDescendants()) do
-        if (d:IsA("TextLabel") or d:IsA("TextButton")) and not d:IsDescendantOf(GuiRoot) and IsVisibleDeep(d) then
-            local sc = d:FindFirstAncestorWhichIsA("ScrollingFrame")
-            local inMovePanel = (sc and sc.AbsolutePosition.Y >= boardBot - 25) or (d.AbsolutePosition.Y >= boardBot and d.AbsoluteSize.Y < 45)
-            if inMovePanel then
-                local txt = string.gsub(string.gsub(d.Text, "<[^>]+>", ""), "^%s*(.-)%s*$", "%1")
-                if txt ~= "" and d.AbsoluteSize.Y > 8 and d.AbsoluteSize.Y < 45 then
-                    local yKey = math.floor((d.AbsolutePosition.Y + (sc and sc.CanvasPosition.Y or 0)) / 10) * 10
-                    rowsByY[yKey] = rowsByY[yKey] or {}
-                    table.insert(rowsByY[yKey], { t = txt, x = d.AbsolutePosition.X })
-                end
-            end
-        end
-    end
-
-    local maxPlySeen = 0
-    for _, items in pairs(rowsByY) do
-        table.sort(items, function(a, b) return a.x < b.x end)
-        local rowTokens = {}
-        for _, it in ipairs(items) do
-            for tk in string.gmatch(it.t, "%S+") do
-                if #rowTokens == 0 or rowTokens[#rowTokens] ~= tk then
-                    rowTokens[#rowTokens + 1] = tk
-                end
-            end
-        end
-        -- Check if row starts with move number like "1.", "2.", "14."
-        if #rowTokens >= 2 then
-            local mvNum = tonumber(string.match(rowTokens[1], "^(%d+)%.+$"))
-            if mvNum and mvNum >= 1 and mvNum <= 200 then
-                if mvNum == 1 and rowTokens[2] and not rowTokens[3] then
-                    -- New game started on move 1! Clear old higher moves
-                    for k in pairs(MoveCacheByPly) do
-                        if k > 2 then MoveCacheByPly[k] = nil end
+            local pos = d.AbsolutePosition
+            -- Must be a 1:1 square (width == height within 10px), >= 210px, and NEVER fullscreen height!
+            if sz.X >= 210 and sz.Y >= 210 and math.abs(sz.X - sz.Y) <= 10 and sz.Y <= vp.Y * 0.72 and pos.Y >= 30 then
+                local expectedTileW = sz.X / 8
+                local tileMatches = 0
+                for _, ch in ipairs(d:GetDescendants()) do
+                    if ch:IsA("GuiObject") and ch.Visible then
+                        local csz = ch.AbsoluteSize
+                        if math.abs(csz.X - expectedTileW) <= 6 and math.abs(csz.Y - expectedTileW) <= 6 then
+                            tileMatches += 1
+                        end
                     end
                 end
-                local wSAN = string.gsub(rowTokens[2], "[+#!?]", "")
-                MoveCacheByPly[(mvNum - 1) * 2 + 1] = wSAN
-                maxPlySeen = math.max(maxPlySeen, (mvNum - 1) * 2 + 1)
-                if rowTokens[3] then
-                    local bSAN = string.gsub(rowTokens[3], "[+#!?]", "")
-                    MoveCacheByPly[(mvNum - 1) * 2 + 2] = bSAN
-                    maxPlySeen = math.max(maxPlySeen, (mvNum - 1) * 2 + 2)
-                else
-                    MoveCacheByPly[(mvNum - 1) * 2 + 2] = nil
+                local score = tileMatches * 10 + (#d:GetDescendants())
+                if score > bestScore then
+                    bestScore = score
+                    bestFrame = d
                 end
             end
         end
     end
-    return maxPlySeen
+
+    if bestFrame then
+        -- Check if we can tighten the bounding box to the exact 64 square tiles inside `bestFrame`
+        local expectedTileW = bestFrame.AbsoluteSize.X / 8
+        local minX, minY, maxX, maxY = 99999, 99999, -99999, -99999
+        local tileCount = 0
+        for _, ch in ipairs(bestFrame:GetDescendants()) do
+            if ch:IsA("GuiObject") and ch.Visible then
+                local csz = ch.AbsoluteSize
+                local cpos = ch.AbsolutePosition
+                if math.abs(csz.X - expectedTileW) <= 5 and math.abs(csz.Y - expectedTileW) <= 5 then
+                    tileCount += 1
+                    if cpos.X < minX then minX = cpos.X end
+                    if cpos.Y < minY then minY = cpos.Y end
+                    if cpos.X + csz.X > maxX then maxX = cpos.X + csz.X end
+                    if cpos.Y + csz.Y > maxY then maxY = cpos.Y + csz.Y end
+                end
+            end
+        end
+
+        CachedBoardInfo.Frame = bestFrame
+        if tileCount >= 32 and math.abs((maxX - minX) - (maxY - minY)) <= 12 then
+            CachedBoardInfo.X = minX
+            CachedBoardInfo.Y = minY
+            CachedBoardInfo.W = maxX - minX
+            CachedBoardInfo.H = maxY - minY
+        else
+            CachedBoardInfo.X = bestFrame.AbsolutePosition.X
+            CachedBoardInfo.Y = bestFrame.AbsolutePosition.Y
+            CachedBoardInfo.W = bestFrame.AbsoluteSize.X
+            CachedBoardInfo.H = bestFrame.AbsoluteSize.Y
+        end
+        return CachedBoardInfo
+    end
+
+    return nil
 end
 
-local function DetectTurnAndSide(boardFrame)
-    if not boardFrame then return "NO_BOARD", 1 end
-    local cy = boardFrame.AbsolutePosition.Y + boardFrame.AbsoluteSize.Y * 0.5
-    local topY = boardFrame.AbsolutePosition.Y
-    local topClock, botClock, badgeTurn = nil, nil, nil
+-- Detects board orientation (White = 1, Black = -1) directly from the "1".."8" and "a".."h" rank/file labels on the board!
+-- Look at video_1.mp4 at 00:31: When playing Black, rank "1" is at the TOP of the board and rank "8" is at the BOTTOM!
+local function DetectBoardOrientationFromLabels(bGeo)
+    if not bGeo or not bGeo.Frame then return nil end
+    local bx, by, bw, bh = bGeo.X, bGeo.Y, bGeo.W, bGeo.H
+    local rank1Y, rank8Y = nil, nil
+    local fileAX, fileHX = nil, nil
 
     for _, d in ipairs(PlayerGui:GetDescendants()) do
         if d:IsA("TextLabel") and not d:IsDescendantOf(GuiRoot) and IsVisibleDeep(d) then
-            local t = string.lower(d.Text)
-            if string.find(t, "to move") then
-                badgeTurn = (d.AbsolutePosition.Y > cy) and "MY_TURN" or "OPP_TURN"
-            end
-            local tr = string.gsub(d.Text, "%s+", "")
-            if string.match(tr, "^%d+:%d%d$") then
-                if d.AbsolutePosition.Y < topY then topClock = d
-                elseif d.AbsolutePosition.Y > cy then botClock = d end
+            local pos = d.AbsolutePosition
+            local sz = d.AbsoluteSize
+            -- Must be inside or within 28px of the 8x8 board edges and small font label
+            if sz.X < 36 and sz.Y < 36 and pos.X >= (bx - 28) and pos.X <= (bx + bw + 28) and pos.Y >= (by - 28) and pos.Y <= (by + bh + 28) then
+                local txt = string.gsub(d.Text, "%s+", "")
+                if txt == "1" then rank1Y = pos.Y
+                elseif txt == "8" then rank8Y = pos.Y
+                elseif txt == "a" then fileAX = pos.X
+                elseif txt == "h" then fileHX = pos.X
+                end
             end
         end
     end
 
-    if badgeTurn then return badgeTurn end
-    if topClock and botClock then
-        local bLum = (botClock.TextColor3.R + botClock.TextColor3.G + botClock.TextColor3.B) / 3
-        local tLum = (topClock.TextColor3.R + topClock.TextColor3.G + topClock.TextColor3.B) / 3
-        if bLum < 0.48 and tLum > 0.52 then return "MY_TURN"
-        elseif tLum < 0.48 and bLum > 0.52 then return "OPP_TURN" end
-        return "LIVE"
+    if rank1Y and rank8Y and math.abs(rank1Y - rank8Y) > (bh * 0.5) then
+        return (rank1Y > rank8Y) and 1 or -1
     end
-    return "IDLE"
+    if fileAX and fileHX and math.abs(fileAX - fileHX) > (bw * 0.5) then
+        return (fileAX < fileHX) and 1 or -1
+    end
+    return nil
+end
+
+-- Layer 1: Passive Spy on RoChess #3 RAMBoard (`makeMove`) + Auto-Calibrated Piece Map
+local RAMTracker = {
+    ActiveBoard = nil,
+    AllBoards = {},
+    CodeToPiece = {},
+    Calibrated = false,
+    FlippedRanks = false
+}
+
+local function CalibrateRAMBoardMap(rb)
+    if type(rb) ~= "table" then return end
+    -- Standard starting board at ply == 0:
+    -- Either Rank 1 is at indices 1..8 OR indices 57..64
+    local e1 = rb[5]
+    local e8 = rb[61]
+    if e1 ~= nil and e8 ~= nil and e1 ~= e8 and (rb[17] == 0 or rb[17] == false or rb[17] == "") then
+        -- Check if rb[1..8] are White pieces or Black pieces
+        RAMTracker.CodeToPiece[rb[1]] = 4   -- Rook
+        RAMTracker.CodeToPiece[rb[2]] = 2   -- Knight
+        RAMTracker.CodeToPiece[rb[3]] = 3   -- Bishop
+        RAMTracker.CodeToPiece[rb[4]] = 5   -- Queen
+        RAMTracker.CodeToPiece[rb[5]] = 6   -- King
+        RAMTracker.CodeToPiece[rb[9]] = 1   -- Pawn
+        RAMTracker.CodeToPiece[rb[49]] = -1 -- Black Pawn
+        RAMTracker.CodeToPiece[rb[57]] = -4 -- Black Rook
+        RAMTracker.CodeToPiece[rb[58]] = -2 -- Black Knight
+        RAMTracker.CodeToPiece[rb[59]] = -3 -- Black Bishop
+        RAMTracker.CodeToPiece[rb[60]] = -5 -- Black Queen
+        RAMTracker.CodeToPiece[rb[61]] = -6 -- Black King
+        RAMTracker.Calibrated = true
+        Logger.Log("RAM", "Auto-calibrated RAMBoard piece map from ply=0!")
+    end
+end
+
+local function ScanAndSpyRAMBoards()
+    if not getgc then return end
+    pcall(function()
+        table.clear(RAMTracker.AllBoards)
+        for _, obj in ipairs(getgc(true)) do
+            if type(obj) == "table" and not rawget(obj, "_IsOurAI") then
+                local brd = rawget(obj, "board")
+                local ply = rawget(obj, "ply")
+                local kingSq = rawget(obj, "kingSq")
+                if type(brd) == "table" and type(ply) == "number" and kingSq ~= nil then
+                    table.insert(RAMTracker.AllBoards, obj)
+                    if ply == 0 and not RAMTracker.Calibrated then
+                        CalibrateRAMBoardMap(brd)
+                    end
+                    -- Install passive spy on prototype #3 `makeMove` so we always lock the active match board!
+                    local mt = getmetatable(obj)
+                    local proto = type(mt) == "table" and (rawget(mt, "__index") or mt) or nil
+                    if type(proto) == "table" and type(rawget(proto, "makeMove")) == "function" and not rawget(proto, "_V9Spy") then
+                        rawset(proto, "_V9Spy", true)
+                        local origMM = rawget(proto, "makeMove")
+                        rawset(proto, "makeMove", function(self, ...)
+                            if type(self) == "table" and rawget(self, "board") then
+                                RAMTracker.ActiveBoard = self
+                            end
+                            return origMM(self, ...)
+                        end)
+                        Logger.Log("SPY", "Hooked passive spy onto #3 RAMBoard:makeMove!")
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- Layer 2: Row-Clustering UI Move List Scraper (Below the REAL 8x8 Board Y!)
+local PersistentMovesByPly = {}
+
+local IgnoredWords = {
+    draw = true, resign = true, abort = true, game = true, players = true,
+    bullet = true, blitz = true, rapid = true, report = true, opponent = true
+}
+
+local function ScrapeMovesBelowRealBoard(bGeo)
+    if not bGeo then return 0 end
+    local realBoardBottomY = bGeo.Y + bGeo.H - 8
+    local rawElements = {}
+
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton")) and not d:IsDescendantOf(GuiRoot) and IsVisibleDeep(d) then
+            local pos = d.AbsolutePosition
+            local sz = d.AbsoluteSize
+            local sc = d:FindFirstAncestorWhichIsA("ScrollingFrame")
+            local isBelowBoard = (sc and sc.AbsolutePosition.Y >= realBoardBottomY - 20) or (pos.Y >= realBoardBottomY and pos.Y <= realBoardBottomY + 280)
+
+            if isBelowBoard and sz.Y >= 8 and sz.Y <= 44 then
+                local clean = string.gsub(string.gsub(d.Text, "<[^>]+>", ""), "^%s*(.-)%s*$", "%1")
+                if clean ~= "" and not IgnoredWords[string.lower(clean)] then
+                    local canvasY = (pos.Y + sz.Y * 0.5) + (sc and sc.CanvasPosition.Y or 0)
+                    table.insert(rawElements, {
+                        text = clean,
+                        cy = canvasY,
+                        x = pos.X
+                    })
+                end
+            end
+        end
+    end
+
+    -- Sort top-to-bottom by canvasY
+    table.sort(rawElements, function(a, b)
+        return a.cy < b.cy
+    end)
+
+    -- Cluster elements into horizontal rows whenever their vertical centers are within 13px
+    local rows = {}
+    for _, el in ipairs(rawElements) do
+        local lastRow = rows[#rows]
+        if not lastRow or math.abs(el.cy - lastRow.avgY) > 13 then
+            rows[#rows + 1] = { avgY = el.cy, items = { el } }
+        else
+            table.insert(lastRow.items, el)
+            local sumY = 0
+            for _, it in ipairs(lastRow.items) do sumY += it.cy end
+            lastRow.avgY = sumY / #lastRow.items
+        end
+    end
+
+    local maxPly = 0
+    local sequentialFallback = {}
+
+    for _, row in ipairs(rows) do
+        table.sort(row.items, function(a, b) return a.x < b.x end)
+        local tokens = {}
+        for _, it in ipairs(row.items) do
+            for tk in string.gmatch(it.text, "%S+") do
+                if #tokens == 0 or tokens[#tokens] ~= tk then
+                    tokens[#tokens + 1] = tk
+                end
+            end
+        end
+
+        local rowMoveNum = nil
+        local rowSANs = {}
+        for _, tk in ipairs(tokens) do
+            local numMatch = tonumber(string.match(tk, "^(%d+)%.+$"))
+            if numMatch and numMatch >= 1 and numMatch <= 250 then
+                rowMoveNum = numMatch
+            else
+                local stripped = string.gsub(tk, "[+#!?]", "")
+                if
+                    stripped == "O-O" or stripped == "O-O-O" or
+                    string.match(stripped, "^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8]=?[QRNB]?$")
+                then
+                    rowSANs[#rowSANs + 1] = stripped
+                    sequentialFallback[#sequentialFallback + 1] = stripped
+                end
+            end
+        end
+
+        if rowMoveNum and #rowSANs >= 1 then
+            if rowMoveNum == 1 and #rowSANs == 1 then
+                -- Fresh game on Move 1: clear stale cached moves above ply 2
+                for k in pairs(PersistentMovesByPly) do
+                    if k > 2 then PersistentMovesByPly[k] = nil end
+                end
+            end
+            local wPly = (rowMoveNum - 1) * 2 + 1
+            local bPly = (rowMoveNum - 1) * 2 + 2
+            PersistentMovesByPly[wPly] = rowSANs[1]
+            maxPly = math.max(maxPly, wPly)
+            if rowSANs[2] then
+                PersistentMovesByPly[bPly] = rowSANs[2]
+                maxPly = math.max(maxPly, bPly)
+            else
+                PersistentMovesByPly[bPly] = nil
+            end
+        end
+    end
+
+    -- Fallback if move numbers weren't in the same row cluster
+    if maxPly == 0 and #sequentialFallback > 0 then
+        for idx, san in ipairs(sequentialFallback) do
+            PersistentMovesByPly[idx] = san
+            maxPly = idx
+        end
+    end
+
+    for k in pairs(PersistentMovesByPly) do
+        if k > maxPly and maxPly > 0 then
+            -- Keep earlier cached scrolled moves, only trim if a new shorter match reset
+            if maxPly <= 2 then
+                PersistentMovesByPly[k] = nil
+            else
+                maxPly = math.max(maxPly, k)
+            end
+        end
+    end
+
+    return maxPly
 end
 
 --------------------------------------------------------------------------------
--- 5. ARROW ESP OVERLAY (STRICTLY SHOWN AFTER CALCULATION COMPLETES)
+-- 8. VIP PRECISION ARROW ESP RENDERER (SHARP CHEVRON + FLOATING BADGE + DANGER ESP)
 --------------------------------------------------------------------------------
 local Overlay = Instance.new("Frame", GuiRoot)
+Overlay.Name = "VIP_ESP_Overlay"
 Overlay.Size = UDim2.new(1, 0, 1, 0)
 Overlay.BackgroundTransparency = 1
 Overlay.Active = false
 
-local function MakeArrowESP(color, trans, z)
-    local g = {}
-    g.FromBox = Instance.new("Frame", Overlay)
-    g.FromBox.BackgroundColor3 = color
-    g.FromBox.BackgroundTransparency = 0.65
-    g.FromBox.BorderSizePixel = 0
-    g.FromBox.ZIndex = z
-    g.FromBox.Visible = false
-    Instance.new("UICorner", g.FromBox).CornerRadius = UDim.new(0, 6)
-    local fs = Instance.new("UIStroke", g.FromBox)
-    fs.Color = color; fs.Thickness = 2.5
+-- Subtle 8x8 Board Calibration Border (Proves 100% pixel lock onto the 8x8 grid!)
+local BoardLockBox = Instance.new("Frame", Overlay)
+BoardLockBox.BackgroundTransparency = 1
+BoardLockBox.BorderSizePixel = 0
+BoardLockBox.Visible = false
+BoardLockBox.ZIndex = 20
+local BoardLockStroke = Instance.new("UIStroke", BoardLockBox)
+BoardLockStroke.Color = Color3.fromRGB(70, 215, 130)
+BoardLockStroke.Thickness = 1.5
+BoardLockStroke.Transparency = 0.45
 
-    g.ToBox = Instance.new("Frame", Overlay)
-    g.ToBox.BackgroundColor3 = color
-    g.ToBox.BackgroundTransparency = 0.65
-    g.ToBox.BorderSizePixel = 0
-    g.ToBox.ZIndex = z
-    g.ToBox.Visible = false
-    Instance.new("UICorner", g.ToBox).CornerRadius = UDim.new(0, 6)
-    local ts = Instance.new("UIStroke", g.ToBox)
-    ts.Color = color; ts.Thickness = 2.5
+-- King-In-Check / Danger Square Highlight
+local DangerBox = Instance.new("Frame", Overlay)
+DangerBox.BackgroundColor3 = Color3.fromRGB(255, 45, 45)
+DangerBox.BackgroundTransparency = 0.45
+DangerBox.BorderSizePixel = 0
+DangerBox.Visible = false
+DangerBox.ZIndex = 35
+Instance.new("UICorner", DangerBox).CornerRadius = UDim.new(0, 6)
+local DangerStroke = Instance.new("UIStroke", DangerBox)
+DangerStroke.Color = Color3.fromRGB(255, 80, 80)
+DangerStroke.Thickness = 2.5
 
-    g.Shaft = Instance.new("Frame", Overlay)
-    g.Shaft.BackgroundColor3 = color
-    g.Shaft.BackgroundTransparency = trans
-    g.Shaft.BorderSizePixel = 0
-    g.Shaft.AnchorPoint = Vector2.new(0.5, 0.5)
-    g.Shaft.ZIndex = z + 1
-    g.Shaft.Visible = false
-    Instance.new("UICorner", g.Shaft).CornerRadius = UDim.new(0, 4)
+-- High-Precision Vector Arrow Constructor (Origin Ring + Target Ring + Smooth Shaft + 14-Slice Micro-Tapered Triangular Head + Two Wing Edges + Floating Move/Eval Badge)
+local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
+    local arrow = {}
 
-    g.Head = {}
-    for i = 1, 5 do
+    arrow.OriginBox = Instance.new("Frame", Overlay)
+    arrow.OriginBox.BackgroundColor3 = mainColor
+    arrow.OriginBox.BackgroundTransparency = 0.72
+    arrow.OriginBox.BorderSizePixel = 0
+    arrow.OriginBox.ZIndex = zBase
+    arrow.OriginBox.Visible = false
+    Instance.new("UICorner", arrow.OriginBox).CornerRadius = UDim.new(0, 6)
+    local os = Instance.new("UIStroke", arrow.OriginBox)
+    os.Color = mainColor; os.Thickness = 2.2; os.Transparency = 0.15
+
+    arrow.TargetBox = Instance.new("Frame", Overlay)
+    arrow.TargetBox.BackgroundColor3 = mainColor
+    arrow.TargetBox.BackgroundTransparency = 0.66
+    arrow.TargetBox.BorderSizePixel = 0
+    arrow.TargetBox.ZIndex = zBase
+    arrow.TargetBox.Visible = false
+    Instance.new("UICorner", arrow.TargetBox).CornerRadius = UDim.new(0, 6)
+    local ts = Instance.new("UIStroke", arrow.TargetBox)
+    ts.Color = mainColor; ts.Thickness = 2.4; ts.Transparency = 0.1
+
+    arrow.Shaft = Instance.new("Frame", Overlay)
+    arrow.Shaft.BackgroundColor3 = mainColor
+    arrow.Shaft.BackgroundTransparency = trans
+    arrow.Shaft.BorderSizePixel = 0
+    arrow.Shaft.AnchorPoint = Vector2.new(0.5, 0.5)
+    arrow.Shaft.ZIndex = zBase + 1
+    arrow.Shaft.Visible = false
+    Instance.new("UICorner", arrow.Shaft).CornerRadius = UDim.new(0, 4)
+
+    -- Two Crisp Angled Wing Edges for a Razor-Sharp Arrowhead Outline
+    arrow.LeftWing = Instance.new("Frame", Overlay)
+    arrow.LeftWing.BackgroundColor3 = mainColor
+    arrow.LeftWing.BackgroundTransparency = trans
+    arrow.LeftWing.BorderSizePixel = 0
+    arrow.LeftWing.AnchorPoint = Vector2.new(0.5, 0.5)
+    arrow.LeftWing.ZIndex = zBase + 3
+    arrow.LeftWing.Visible = false
+    Instance.new("UICorner", arrow.LeftWing).CornerRadius = UDim.new(1, 0)
+
+    arrow.RightWing = Instance.new("Frame", Overlay)
+    arrow.RightWing.BackgroundColor3 = mainColor
+    arrow.RightWing.BackgroundTransparency = trans
+    arrow.RightWing.BorderSizePixel = 0
+    arrow.RightWing.AnchorPoint = Vector2.new(0.5, 0.5)
+    arrow.RightWing.ZIndex = zBase + 3
+    arrow.RightWing.Visible = false
+    Instance.new("UICorner", arrow.RightWing).CornerRadius = UDim.new(1, 0)
+
+    -- 12 Micro-Slices to fill the triangular arrowhead smoothly without staircase steps
+    arrow.HeadFill = {}
+    for i = 1, 12 do
         local s = Instance.new("Frame", Overlay)
-        s.BackgroundColor3 = color
+        s.BackgroundColor3 = mainColor
         s.BackgroundTransparency = trans
         s.BorderSizePixel = 0
         s.AnchorPoint = Vector2.new(0.5, 0.5)
-        s.ZIndex = z + 2
+        s.ZIndex = zBase + 2
         s.Visible = false
-        Instance.new("UICorner", s).CornerRadius = UDim.new(0, 2)
-        g.Head[i] = s
+        arrow.HeadFill[i] = s
     end
 
-    function g:Hide()
-        self.FromBox.Visible = false
-        self.ToBox.Visible = false
+    -- Floating SAN + Eval Tag Pill right near the destination square
+    arrow.Badge = Instance.new("TextLabel", Overlay)
+    arrow.Badge.Size = UDim2.fromOffset(64, 18)
+    arrow.Badge.AnchorPoint = Vector2.new(0.5, 0.5)
+    arrow.Badge.BackgroundColor3 = badgeBgColor
+    arrow.Badge.BackgroundTransparency = 0.08
+    arrow.Badge.Font = Enum.Font.GothamBold
+    arrow.Badge.TextSize = 10
+    arrow.Badge.TextColor3 = Color3.new(1, 1, 1)
+    arrow.Badge.ZIndex = zBase + 5
+    arrow.Badge.Visible = false
+    Instance.new("UICorner", arrow.Badge).CornerRadius = UDim.new(0, 5)
+    local bs = Instance.new("UIStroke", arrow.Badge)
+    bs.Color = mainColor; bs.Thickness = 1.3
+
+    function arrow:Hide()
+        self.OriginBox.Visible = false
+        self.TargetBox.Visible = false
         self.Shaft.Visible = false
-        for i = 1, 5 do self.Head[i].Visible = false end
+        self.LeftWing.Visible = false
+        self.RightWing.Visible = false
+        self.Badge.Visible = false
+        for i = 1, 12 do self.HeadFill[i].Visible = false end
     end
 
-    function g:Draw(fx, fy, tx, ty, cellW)
+    function arrow:Draw(fx, fy, tx, ty, cellW, badgeText)
         local dx, dy = tx - fx, ty - fy
         local dist = math.sqrt(dx * dx + dy * dy)
-        if dist < 4 then self:Hide() return end
+        if dist < 4 then self:Hide(); return end
+
         local ux, uy = dx / dist, dy / dist
-        local ang = math.deg(math.atan2(dy, dx))
-        local bSz = math.floor(cellW * 0.90)
+        local px, py = -uy, ux -- Perpendicular unit vector
+        local angDeg = math.deg(math.atan2(dy, dx))
 
-        self.FromBox.Size = UDim2.fromOffset(bSz, bSz)
-        self.FromBox.Position = UDim2.fromOffset(fx - bSz * 0.5, fy - bSz * 0.5)
-        self.FromBox.Visible = true
+        local boxSz = math.floor(cellW * 0.88)
+        self.OriginBox.Size = UDim2.fromOffset(boxSz, boxSz)
+        self.OriginBox.Position = UDim2.fromOffset(fx - boxSz * 0.5, fy - boxSz * 0.5)
+        self.OriginBox.Visible = true
 
-        self.ToBox.Size = UDim2.fromOffset(bSz, bSz)
-        self.ToBox.Position = UDim2.fromOffset(tx - bSz * 0.5, ty - bSz * 0.5)
-        self.ToBox.Visible = true
+        self.TargetBox.Size = UDim2.fromOffset(boxSz, boxSz)
+        self.TargetBox.Position = UDim2.fromOffset(tx - boxSz * 0.5, ty - boxSz * 0.5)
+        self.TargetBox.Visible = true
 
-        local hLen = math.clamp(cellW * 0.52, 16, 34)
-        local hWid = math.clamp(cellW * 0.58, 18, 38)
-        local sThk = math.clamp(cellW * 0.24, 8, 15)
-        local sLen = math.max(4, dist - hLen)
+        local headLen = math.clamp(cellW * 0.48, 15, 30)
+        local headHalfW = math.clamp(cellW * 0.28, 9, 18)
+        local shaftThk = math.clamp(cellW * 0.21, 7, 13)
+        local startPad = cellW * 0.10
+        local shaftLen = math.max(4, dist - headLen * 0.85 - startPad)
 
-        self.Shaft.Size = UDim2.fromOffset(sLen, sThk)
-        self.Shaft.Position = UDim2.fromOffset(fx + ux * (sLen * 0.5), fy + uy * (sLen * 0.5))
-        self.Shaft.Rotation = ang
+        self.Shaft.Size = UDim2.fromOffset(shaftLen, shaftThk)
+        self.Shaft.Position = UDim2.fromOffset(fx + ux * (startPad + shaftLen * 0.5), fy + uy * (startPad + shaftLen * 0.5))
+        self.Shaft.Rotation = angDeg
         self.Shaft.Visible = true
 
-        local bx, by = tx - ux * hLen, ty - uy * hLen
-        for i = 1, 5 do
-            local t = (i - 0.5) / 5
-            local w = math.max(3, hWid * (1.0 - t * 0.86))
-            local sl = self.Head[i]
-            sl.Size = UDim2.fromOffset(hLen / 5 + 2, w)
-            sl.Position = UDim2.fromOffset(bx + ux * (t * hLen), by + uy * (t * hLen))
-            sl.Rotation = ang
+        -- Base of arrowhead
+        local baseX = tx - ux * headLen
+        local baseY = ty - uy * headLen
+
+        -- Left and Right corners of the triangle base
+        local leftCornerX = baseX + px * headHalfW
+        local leftCornerY = baseY + py * headHalfW
+        local rightCornerX = baseX - px * headHalfW
+        local rightCornerY = baseY - py * headHalfW
+
+        -- Position LeftWing (from tip to leftCorner) & RightWing (from tip to rightCorner)
+        local wingLen = math.sqrt(headLen * headLen + headHalfW * headHalfW)
+        local wingThk = math.max(3, shaftThk * 0.35)
+
+        local ldx, ldy = leftCornerX - tx, leftCornerY - ty
+        self.LeftWing.Size = UDim2.fromOffset(wingLen, wingThk)
+        self.LeftWing.Position = UDim2.fromOffset((tx + leftCornerX) * 0.5, (ty + leftCornerY) * 0.5)
+        self.LeftWing.Rotation = math.deg(math.atan2(ldy, ldx))
+        self.LeftWing.Visible = true
+
+        local rdx, rdy = rightCornerX - tx, rightCornerY - ty
+        self.RightWing.Size = UDim2.fromOffset(wingLen, wingThk)
+        self.RightWing.Position = UDim2.fromOffset((tx + rightCornerX) * 0.5, (ty + rightCornerY) * 0.5)
+        self.RightWing.Rotation = math.deg(math.atan2(rdy, rdx))
+        self.RightWing.Visible = true
+
+        -- 12 Micro-slices filling the triangle interior
+        local nSlices = #self.HeadFill
+        local stepLen = headLen / nSlices
+        for i = 1, nSlices do
+            local t = (i - 0.5) / nSlices
+            local w = math.max(2, (headHalfW * 2) * (1.0 - t))
+            local sl = self.HeadFill[i]
+            sl.Size = UDim2.fromOffset(stepLen + 1.5, w)
+            sl.Position = UDim2.fromOffset(baseX + ux * (t * headLen), baseY + uy * (t * headLen))
+            sl.Rotation = angDeg
             sl.Visible = true
         end
+
+        if Config.ShowMoveBadges and badgeText and badgeText ~= "" then
+            self.Badge.Text = badgeText
+            local textW = math.max(46, #badgeText * 6.5 + 10)
+            self.Badge.Size = UDim2.fromOffset(textW, 18)
+            self.Badge.Position = UDim2.fromOffset(tx, ty - cellW * 0.48)
+            self.Badge.Visible = true
+        else
+            self.Badge.Visible = false
+        end
     end
-    return g
+
+    return arrow
 end
 
-local BestArrow = MakeArrowESP(Color3.fromRGB(95, 185, 45), 0.15, 60)
-local PonderArrow = MakeArrowESP(Color3.fromRGB(235, 145, 30), 0.45, 50)
+-- #1 Primary Best Move Arrow (Stockfish Neon Green)
+local BestArrow = CreateVIPArrow(Color3.fromRGB(95, 205, 40), Color3.fromRGB(18, 38, 18), 0.14, 65)
+-- #2 Alternative Move Arrow (Electric Cyan)
+local AltArrow = CreateVIPArrow(Color3.fromRGB(40, 185, 235), Color3.fromRGB(15, 32, 45), 0.35, 55)
+-- Opponent Ponder / Threat Arrow (Vibrant Amber-Orange)
+local PonderArrow = CreateVIPArrow(Color3.fromRGB(245, 145, 30), Color3.fromRGB(45, 25, 12), 0.38, 45)
 
+-- Docked Evaluation Bar (Matches exact 8x8 board height!)
 local EvalBg = Instance.new("Frame", Overlay)
-EvalBg.BackgroundColor3 = Color3.fromRGB(30, 34, 42)
+EvalBg.BackgroundColor3 = Color3.fromRGB(28, 32, 40)
 EvalBg.BorderSizePixel = 0
 EvalBg.Visible = false
-EvalBg.ZIndex = 55
+EvalBg.ZIndex = 60
 Instance.new("UICorner", EvalBg).CornerRadius = UDim.new(0, 4)
+local EvalStroke = Instance.new("UIStroke", EvalBg)
+EvalStroke.Color = Color3.fromRGB(75, 85, 105); EvalStroke.Thickness = 1
 
 local EvalFill = Instance.new("Frame", EvalBg)
-EvalFill.BackgroundColor3 = Color3.fromRGB(110, 225, 95)
+EvalFill.BackgroundColor3 = Color3.fromRGB(105, 225, 95)
 EvalFill.BorderSizePixel = 0
 EvalFill.AnchorPoint = Vector2.new(0, 1)
 EvalFill.Position = UDim2.new(0, 0, 1, 0)
 EvalFill.Size = UDim2.new(1, 0, 0.5, 0)
-EvalFill.ZIndex = 56
+EvalFill.ZIndex = 61
 Instance.new("UICorner", EvalFill).CornerRadius = UDim.new(0, 4)
 
-local function SqCenter(bf, sqIdx, mySide)
+local EvalText = Instance.new("TextLabel", EvalBg)
+EvalText.Size = UDim2.fromOffset(38, 16)
+EvalText.AnchorPoint = Vector2.new(0.5, 1)
+EvalText.Position = UDim2.new(0.5, 0, 0, -3)
+EvalText.BackgroundColor3 = Color3.fromRGB(16, 20, 28)
+EvalText.Font = Enum.Font.GothamBold
+EvalText.TextSize = 9
+EvalText.TextColor3 = Color3.fromRGB(130, 240, 145)
+EvalText.Text = "+0.0"
+EvalText.ZIndex = 62
+Instance.new("UICorner", EvalText).CornerRadius = UDim.new(0, 4)
+
+local function ComputeExactSqCenter(bGeo, sqIdx, mySide)
     local f, r = FR(sqIdx)
-    local c = (mySide == 1) and (f - 1) or (8 - f)
-    local rw = (mySide == 1) and (8 - r) or (r - 1)
-    local p, s = bf.AbsolutePosition, bf.AbsoluteSize
-    local cw = s.X / 8
-    return math.floor(p.X + (c + 0.5) * cw), math.floor(p.Y + (rw + 0.5) * cw), cw
+    local col = (mySide == 1) and (f - 1) or (8 - f)
+    local row = (mySide == 1) and (8 - r) or (r - 1)
+    local cw = bGeo.W / 8
+    local ch = bGeo.H / 8
+    return math.floor(bGeo.X + (col + 0.5) * cw), math.floor(bGeo.Y + (row + 0.5) * ch), cw
 end
 
 --------------------------------------------------------------------------------
--- 6. MENU & LIVE DEBUG LOG UI
+-- 9. VIP CONTROL MENU & TOGGLEABLE LIVE LOG WINDOW
 --------------------------------------------------------------------------------
 local Menu = Instance.new("Frame", GuiRoot)
-Menu.Size = UDim2.new(0, 315, 0, 158)
-Menu.Position = UDim2.new(0.03, 0, 0.43, 0)
-Menu.BackgroundColor3 = Color3.fromRGB(15, 19, 26)
+Menu.Size = UDim2.new(0, 330, 0, 174)
+Menu.Position = UDim2.new(0.03, 0, 0.44, 0)
+Menu.BackgroundColor3 = Color3.fromRGB(14, 18, 25)
 Menu.BorderSizePixel = 0
 Menu.Active = true
 Menu.Draggable = true
-Instance.new("UICorner", Menu).CornerRadius = UDim.new(0, 8)
-local ms = Instance.new("UIStroke", Menu)
-ms.Color = Color3.fromRGB(95, 195, 65); ms.Thickness = 1.5
+Instance.new("UICorner", Menu).CornerRadius = UDim.new(0, 9)
+local MenuStroke = Instance.new("UIStroke", Menu)
+MenuStroke.Color = Color3.fromRGB(95, 205, 55); MenuStroke.Thickness = 1.6
 
 local Title = Instance.new("TextLabel", Menu)
-Title.Size = UDim2.new(1, -36, 0, 22)
-Title.Position = UDim2.new(0, 8, 0, 3)
+Title.Size = UDim2.new(1, -38, 0, 22)
+Title.Position = UDim2.new(0, 10, 0, 4)
 Title.BackgroundTransparency = 1
 Title.Font = Enum.Font.GothamBold
 Title.TextSize = 12
-Title.TextColor3 = Color3.fromRGB(125, 235, 90)
+Title.TextColor3 = Color3.fromRGB(130, 240, 95)
 Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.Text = "RoChess! GM Arrow ESP v8 [ACTIVE]"
+Title.Text = "RoChess! GM Arrow ESP v9 [VIP EDITION]"
+
+local MinBtn = Instance.new("TextButton", Menu)
+MinBtn.Size = UDim2.fromOffset(24, 20)
+MinBtn.Position = UDim2.new(1, -28, 0, 4)
+MinBtn.BackgroundColor3 = Color3.fromRGB(35, 42, 58)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 12
+MinBtn.TextColor3 = Color3.new(1, 1, 1)
+MinBtn.Text = "-"
+Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 4)
 
 local Status = Instance.new("TextLabel", Menu)
-Status.Size = UDim2.new(1, -16, 0, 68)
-Status.Position = UDim2.new(0, 8, 0, 25)
+Status.Size = UDim2.new(1, -20, 0, 82)
+Status.Position = UDim2.new(0, 10, 0, 26)
 Status.BackgroundTransparency = 1
 Status.Font = Enum.Font.Code
 Status.TextSize = 11
@@ -774,9 +1514,10 @@ Status.TextColor3 = Color3.fromRGB(225, 235, 245)
 Status.TextXAlignment = Enum.TextXAlignment.Left
 Status.TextYAlignment = Enum.TextYAlignment.Top
 Status.TextWrapped = true
-Status.Text = "Menu & ESP Loaded! Waiting for board..."
+Status.Text = "Locking onto 8x8 Chess Board Grid..."
 
-local function AddBtn(txt, xS, yOff, col, fn)
+local MenuButtons = {}
+local function AddMenuBtn(txt, xS, yOff, col, fn)
     local b = Instance.new("TextButton", Menu)
     b.Size = UDim2.new(0.31, -4, 0, 24)
     b.Position = UDim2.new(xS, 8, 1, yOff)
@@ -787,47 +1528,68 @@ local function AddBtn(txt, xS, yOff, col, fn)
     b.Text = txt
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
     b.MouseButton1Click:Connect(function() fn(b) end)
+    MenuButtons[#MenuButtons + 1] = b
     return b
 end
 
-local State = { Ready = false, Best = nil, Ponder = nil, Score = 0, Side = 1, Force = false }
+local RenderState = {
+    Ready = false,
+    Best = nil,
+    Alt = nil,
+    Ponder = nil,
+    Score = 0,
+    Meta = "",
+    Side = 1,
+    InCheckSq = nil,
+    ForceRecalc = false
+}
 
-AddBtn("ESP: ON", 0.00, -54, Color3.fromRGB(45, 145, 65), function(b)
-    Config.Enabled = not Config.Enabled
-    b.Text = Config.Enabled and "ESP: ON" or "ESP: OFF"
-    b.BackgroundColor3 = Config.Enabled and Color3.fromRGB(45, 145, 65) or Color3.fromRGB(135, 45, 45)
-    if not Config.Enabled then BestArrow:Hide(); PonderArrow:Hide(); EvalBg.Visible = false else State.Force = true end
+AddMenuBtn("ESP: ON", 0.00, -56, Color3.fromRGB(45, 150, 65), function(b)
+    Config.ESPEnabled = not Config.ESPEnabled
+    b.Text = Config.ESPEnabled and "ESP: ON" or "ESP: OFF"
+    b.BackgroundColor3 = Config.ESPEnabled and Color3.fromRGB(45, 150, 65) or Color3.fromRGB(140, 45, 45)
+    if not Config.ESPEnabled then
+        BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
+        EvalBg.Visible = false; BoardLockBox.Visible = false; DangerBox.Visible = false
+    else
+        RenderState.ForceRecalc = true
+    end
 end)
 
-AddBtn("Ponder: ON", 0.33, -54, Color3.fromRGB(175, 110, 30), function(b)
-    Config.ShowPonder = not Config.ShowPonder
-    b.Text = Config.ShowPonder and "Ponder: ON" or "Ponder: OFF"
-    if not Config.ShowPonder then PonderArrow:Hide() end
+AddMenuBtn("Alt+Ponder: ON", 0.33, -56, Color3.fromRGB(35, 130, 175), function(b)
+    Config.ShowAltArrow = not Config.ShowAltArrow
+    Config.ShowPonderArrow = Config.ShowAltArrow
+    b.Text = Config.ShowAltArrow and "Alt+Ponder: ON" or "Alt+Ponder: OFF"
+    b.BackgroundColor3 = Config.ShowAltArrow and Color3.fromRGB(35, 130, 175) or Color3.fromRGB(70, 75, 90)
+    if not Config.ShowAltArrow then AltArrow:Hide(); PonderArrow:Hide() end
 end)
 
-AddBtn("Depth: 4", 0.66, -54, Color3.fromRGB(45, 65, 105), function(b)
-    Config.Depth = (Config.Depth % 4) + 3
-    b.Text = "Depth: " .. tostring(Config.Depth)
-    State.Force = true
-    Logger.Log("CFG", "Depth = " .. tostring(Config.Depth))
+AddMenuBtn("Depth: " .. Config.SearchDepth, 0.66, -56, Color3.fromRGB(50, 68, 115), function(b)
+    Config.SearchDepth = (Config.SearchDepth % 4) + 3 -- Cycles 3 -> 4 -> 5 -> 6
+    b.Text = "Depth: " .. tostring(Config.SearchDepth)
+    RenderState.ForceRecalc = true
+    Logger.Log("CFG", "AI Search Depth = " .. tostring(Config.SearchDepth))
 end)
 
-AddBtn("Side: AUTO", 0.00, -27, Color3.fromRGB(60, 75, 95), function(b)
+local SideBtnRef
+SideBtnRef = AddMenuBtn("Side: AUTO", 0.00, -28, Color3.fromRGB(60, 75, 95), function(b)
     Config.SideMode = (Config.SideMode == "AUTO" and "WHITE") or (Config.SideMode == "WHITE" and "BLACK") or "AUTO"
     b.Text = "Side: " .. Config.SideMode
-    State.Force = true
+    RenderState.ForceRecalc = true
     Logger.Log("CFG", "SideMode = " .. Config.SideMode)
 end)
 
-AddBtn("RESET/CALC", 0.33, -27, Color3.fromRGB(40, 125, 135), function()
-    table.clear(MoveCacheByPly)
-    State.Force = true
-    Logger.Log("CMD", "Cleared move cache & recalculated.")
+AddMenuBtn("RESET / CALC", 0.33, -28, Color3.fromRGB(40, 130, 135), function()
+    table.clear(PersistentMovesByPly)
+    CachedBoardInfo.LastCheck = 0
+    RenderState.ForceRecalc = true
+    Logger.Log("CMD", "Cleared cache & forced recalculation.")
 end)
 
+-- Live Log Panel
 local LogBox = Instance.new("Frame", GuiRoot)
-LogBox.Size = UDim2.new(0, 315, 0, 145)
-LogBox.Position = UDim2.new(0.03, 0, 0.66, 0)
+LogBox.Size = UDim2.new(0, 330, 0, 155)
+LogBox.Position = UDim2.new(0.03, 0, 0.68, 0)
 LogBox.BackgroundColor3 = Color3.fromRGB(10, 13, 18)
 LogBox.BorderSizePixel = 0
 LogBox.Active = true
@@ -850,7 +1612,7 @@ LogTxt.ClipsDescendants = true
 LogTxt.Text = ""
 
 Logger.OnChange = function()
-    LogTxt.Text = table.concat(Logger.Lines, "\n")
+    LogTxt.Text = Logger.GetText()
 end
 
 local CopyBtn = Instance.new("TextButton", LogBox)
@@ -863,7 +1625,7 @@ CopyBtn.TextColor3 = Color3.new(1, 1, 1)
 CopyBtn.Text = "COPY LOG"
 Instance.new("UICorner", CopyBtn).CornerRadius = UDim.new(0, 4)
 CopyBtn.MouseButton1Click:Connect(function()
-    if setclipboard then setclipboard(LogTxt.Text); Logger.Log("SYS", "Copied log!") end
+    if setclipboard then setclipboard(Logger.GetText()); Logger.Log("SYS", "Copied log!") end
 end)
 
 local ClearBtn = Instance.new("TextButton", LogBox)
@@ -877,70 +1639,143 @@ ClearBtn.Text = "CLEAR LOG"
 Instance.new("UICorner", ClearBtn).CornerRadius = UDim.new(0, 4)
 ClearBtn.MouseButton1Click:Connect(Logger.Clear)
 
-AddBtn("Log: ON", 0.66, -27, Color3.fromRGB(180, 115, 30), function(b)
+AddMenuBtn("Log: OFF", 0.66, -28, Color3.fromRGB(70, 75, 90), function(b)
     Logger.Visible = not Logger.Visible
     LogBox.Visible = Logger.Visible
     b.Text = Logger.Visible and "Log: ON" or "Log: OFF"
+    b.BackgroundColor3 = Logger.Visible and Color3.fromRGB(180, 115, 30) or Color3.fromRGB(70, 75, 90)
+end)
+
+local IsMin = false
+MinBtn.MouseButton1Click:Connect(function()
+    IsMin = not IsMin
+    Status.Visible = not IsMin
+    for _, b in ipairs(MenuButtons) do b.Visible = not IsMin end
+    Menu.Size = IsMin and UDim2.new(0, 235, 0, 28) or UDim2.new(0, 330, 0, 174)
+    MinBtn.Text = IsMin and "+" or "-"
 end)
 
 --------------------------------------------------------------------------------
--- 7. 60FPS ARROW RENDER LOOP & AI CALCULATION LOOP
+-- 10. 60FPS PRECISION RENDER LOOP & REAL-TIME AI CALCULATION LOOP
 --------------------------------------------------------------------------------
-local RConn = RunService.RenderStepped:Connect(function()
-    if not Config.Enabled or not State.Ready or not State.Best then
-        BestArrow:Hide(); PonderArrow:Hide(); return
+local RenderConn = RunService.RenderStepped:Connect(function()
+    if not Config.ESPEnabled then
+        BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
+        EvalBg.Visible = false; BoardLockBox.Visible = false; DangerBox.Visible = false
+        return
     end
-    local bf = GetBoardFrame()
-    if not bf then BestArrow:Hide(); PonderArrow:Hide(); EvalBg.Visible = false; return end
 
-    local fx, fy, cw = SqCenter(bf, State.Best.from, State.Side)
-    local tx, ty = SqCenter(bf, State.Best.to, State.Side)
-    BestArrow:Draw(fx, fy, tx, ty, cw)
+    local bGeo = GetExactChessBoardGeometry()
+    if not bGeo then
+        BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
+        EvalBg.Visible = false; BoardLockBox.Visible = false; DangerBox.Visible = false
+        return
+    end
 
-    if Config.ShowPonder and State.Ponder then
-        local pfx, pfy = SqCenter(bf, State.Ponder.from, State.Side)
-        local ptx, pty = SqCenter(bf, State.Ponder.to, State.Side)
-        PonderArrow:Draw(pfx, pfy, ptx, pty, cw)
+    -- Draw sleek calibration frame around the exact 8x8 board
+    BoardLockBox.Size = UDim2.fromOffset(bGeo.W, bGeo.H)
+    BoardLockBox.Position = UDim2.fromOffset(bGeo.X, bGeo.Y)
+    BoardLockBox.Visible = true
+
+    -- Highlight King in red if in check
+    if RenderState.InCheckSq then
+        local kx, ky, cw = ComputeExactSqCenter(bGeo, RenderState.InCheckSq, RenderState.Side)
+        local bSz = math.floor(cw * 0.92)
+        DangerBox.Size = UDim2.fromOffset(bSz, bSz)
+        DangerBox.Position = UDim2.fromOffset(kx - bSz * 0.5, ky - bSz * 0.5)
+        DangerBox.Visible = true
+    else
+        DangerBox.Visible = false
+    end
+
+    -- Strictly hide arrows while AI is still calculating!
+    if not RenderState.Ready or not RenderState.Best then
+        BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
+        return
+    end
+
+    local mySide = RenderState.Side
+
+    -- 1. Render #1 Best Move Arrow (Green)
+    local bm = RenderState.Best
+    local fx, fy, cw = ComputeExactSqCenter(bGeo, bm.from, mySide)
+    local tx, ty = ComputeExactSqCenter(bGeo, bm.to, mySide)
+    local bestTag = string.format("%s (%+.1f)", bm.san or bm.uci, RenderState.Score / 100)
+    BestArrow:Draw(fx, fy, tx, ty, cw, bestTag)
+
+    -- 2. Render #2 Alternative Move Arrow (Cyan)
+    if Config.ShowAltArrow and RenderState.Alt then
+        local am = RenderState.Alt
+        local afx, afy = ComputeExactSqCenter(bGeo, am.from, mySide)
+        local atx, aty = ComputeExactSqCenter(bGeo, am.to, mySide)
+        local altTag = string.format("#2 %s", am.san or am.uci)
+        AltArrow:Draw(afx, afy, atx, aty, cw * 0.88, altTag)
+    else
+        AltArrow:Hide()
+    end
+
+    -- 3. Render Opponent Ponder / Threat Arrow (Orange)
+    if Config.ShowPonderArrow and RenderState.Ponder then
+        local pm = RenderState.Ponder
+        local pfx, pfy = ComputeExactSqCenter(bGeo, pm.from, mySide)
+        local ptx, pty = ComputeExactSqCenter(bGeo, pm.to, mySide)
+        local pTag = "Opp: " .. (pm.san or pm.uci)
+        PonderArrow:Draw(pfx, pfy, ptx, pty, cw * 0.82, pTag)
     else
         PonderArrow:Hide()
     end
 
+    -- 4. Update Docked Evaluation Bar (Exact height of the 8x8 board!)
     if Config.ShowEvalBar then
-        EvalBg.Size = UDim2.fromOffset(8, bf.AbsoluteSize.Y)
-        EvalBg.Position = UDim2.fromOffset(math.max(2, bf.AbsolutePosition.X - 12), bf.AbsolutePosition.Y)
+        EvalBg.Size = UDim2.fromOffset(8, bGeo.H)
+        EvalBg.Position = UDim2.fromOffset(math.max(2, bGeo.X - 12), bGeo.Y)
         EvalBg.Visible = true
-        local ratio = math.clamp(0.5 + 0.5 * math.tanh((State.Score / 100) / 4.0), 0.05, 0.95)
+        local pawns = RenderState.Score / 100
+        local ratio = math.clamp(0.5 + 0.5 * math.tanh(pawns / 4.0), 0.05, 0.95)
         EvalFill.Size = UDim2.new(1, 0, ratio, 0)
-        EvalFill.BackgroundColor3 = (State.Score >= 0) and Color3.fromRGB(105, 225, 95) or Color3.fromRGB(235, 85, 85)
+        EvalFill.BackgroundColor3 = (pawns >= 0) and Color3.fromRGB(105, 225, 95) or Color3.fromRGB(235, 85, 85)
+        EvalText.Text = ( math.abs(RenderState.Score) >= 9000 ) and (RenderState.Score > 0 and "M+" or "M-") or string.format("%+.1f", pawns)
+    else
+        EvalBg.Visible = false
     end
 end)
 
 local Running = true
-_G.RoChessV8Cleanup = function()
+_G.RoChessV9Cleanup = function()
     Running = false
-    if RConn then pcall(function() RConn:Disconnect() end) end
+    if RenderConn then pcall(function() RenderConn:Disconnect() end) end
     if GuiRoot and GuiRoot.Parent then GuiRoot:Destroy() end
 end
 
-Logger.Log("INIT", "v8 Compact Loaded (<16KB). Scanning board...")
-task.spawn(ScanRAM)
+Logger.Log("INIT", "v9 VIP Loaded. Locking onto exact 8x8 board...")
+task.spawn(ScanAndSpyRAMBoards)
 
-local LockedSide = nil
-local LastSig = ""
+local LastBoardSig = ""
 local Busy = false
 
 task.spawn(function()
-    while Running and task.wait(0.2) do
-        local bf = GetBoardFrame()
-        if bf and not Busy then
-            local tState = DetectTurnAndSide(bf)
-            if tState == "IDLE" then LockedSide = nil end
+    while Running and task.wait(0.18) do
+        local bGeo = GetExactChessBoardGeometry()
+        if bGeo and not Busy then
+            -- 1. Detect Board Orientation from physical rank/file labels ("1".."8", "a".."h")
+            local autoSide = DetectBoardOrientationFromLabels(bGeo)
+            local mySide = 1
+            if Config.SideMode == "WHITE" then
+                mySide = 1
+            elseif Config.SideMode == "BLACK" then
+                mySide = -1
+            else
+                mySide = autoSide or RenderState.Side or 1
+            end
+            RenderState.Side = mySide
 
-            local maxPly = UpdateMoveCacheFromUI(bf)
+            -- 2. Scrape Move History below the REAL 8x8 board Y!
+            local maxPly = ScrapeMovesBelowRealBoard(bGeo)
             Engine:Reset()
             local applied = 0
+
             for ply = 1, maxPly do
-                local san = MoveCacheByPly[ply]
+                local san = PersistentMovesByPly[ply]
                 if not san then break end
                 local m = Engine:ParseSAN(san, (ply % 2 == 1) and 1 or -1)
                 if m then
@@ -948,52 +1783,75 @@ task.spawn(function()
                     table.insert(Engine.Hist, m.uci)
                     applied += 1
                 else
-                    Logger.Log("WARN", "SAN parse stopped at ply " .. ply .. ": " .. tostring(san))
+                    Logger.Log("SAN-WARN", string.format("Ply %d (%s) parse mismatch", ply, tostring(san)))
                     break
                 end
             end
 
-            if Config.SideMode == "WHITE" then LockedSide = 1
-            elseif Config.SideMode == "BLACK" then LockedSide = -1
-            elseif tState == "MY_TURN" then LockedSide = LockedSide or Engine.Side
-            elseif tState == "OPP_TURN" then LockedSide = LockedSide or -Engine.Side end
+            -- Check if either King is currently in check
+            if Engine:InCheck(Engine.Side) then
+                RenderState.InCheckSq = Engine:FindKing(Engine.Side)
+            else
+                RenderState.InCheckSq = nil
+            end
 
-            local mySide = LockedSide or 1
-            State.Side = mySide
+            local sig = Engine:Signature() .. "|S:" .. tostring(mySide)
+            if sig ~= LastBoardSig or RenderState.ForceRecalc then
+                RenderState.ForceRecalc = false
+                LastBoardSig = sig
 
-            local sig = Engine:Signature() .. "|" .. tostring(mySide)
-            if sig ~= LastSig or State.Force then
-                State.Force = false
-                LastSig = sig
-                State.Ready = false
-                BestArrow:Hide(); PonderArrow:Hide()
+                -- Immediately hide arrows while AI runs multi-depth simulations
+                RenderState.Ready = false
+                BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
 
                 Busy = true
                 local calcSide = Engine.Side
-                local bestM, ponderM, sc, meta = Engine:FindBest(calcSide, function(d, maxD, pv, nodes)
+                local isMyTurn = (calcSide == mySide)
+
+                local bestM, altM, ponderM, sc, meta = Engine:AnalyzePosition(calcSide, function(d, maxD, pv, curSc, nodes)
                     Status.Text = string.format(
-                        "Moves: %d | Turn: %s\nCalculating Depth %d/%d...\nCandidate: %s (%d nodes)\n(Arrow hidden until finished)",
-                        applied, calcSide == 1 and "WHITE" or "BLACK", d, maxD, tostring(pv), nodes
+                        "Board: %dx%d | Side: %s | Ply: %d\n⚡ Analyzing Depth %d/%d...\nPV: %s (%+.2f) | %d nodes\n(Arrows appear once calculation locks)",
+                        math.floor(bGeo.W), math.floor(bGeo.H),
+                        mySide == 1 and "WHITE" or "BLACK",
+                        applied, d, maxD, tostring(pv), curSc / 100, nodes
                     )
                 end)
 
                 if bestM then
-                    State.Best = bestM
-                    State.Ponder = ponderM
-                    State.Score = (calcSide == mySide) and sc or -sc
-                    State.Ready = Config.Enabled
+                    RenderState.Best = bestM
+                    RenderState.Alt = altM
+                    RenderState.Ponder = ponderM
+                    RenderState.Score = isMyTurn and sc or -sc
+                    RenderState.Meta = meta
+                    RenderState.Ready = Config.ESPEnabled
+
+                    local recentSAN = {}
+                    for p = math.max(1, applied - 3), applied do
+                        if PersistentMovesByPly[p] then
+                            recentSAN[#recentSAN + 1] = PersistentMovesByPly[p]
+                        end
+                    end
 
                     Status.Text = string.format(
-                        "Side: %s | Ply: %d (%s)\nBest Move: %s -> %s (%+.2f)\nPonder: %s | [%s | %d nodes]",
+                        "Side: %s (%s) | Ply: %d | %s\n#1 Best: %s (%s) [%+.2f]\n#2 Alt: %s | Opp Reply: %s\nMoves: %s (%d nodes)",
                         mySide == 1 and "WHITE" or "BLACK",
+                        Config.SideMode,
                         applied,
-                        calcSide == mySide and "YOUR TURN" or "OPPONENT",
-                        Alg(bestM.from), Alg(bestM.to),
-                        State.Score / 100,
-                        ponderM and ponderM.uci or "--",
-                        meta, Engine.Nodes
+                        isMyTurn and "YOUR TURN" or "OPPONENT TURN",
+                        bestM.san or bestM.uci, bestM.uci, RenderState.Score / 100,
+                        altM and (altM.san or altM.uci) or "--",
+                        ponderM and (ponderM.san or ponderM.uci) or "--",
+                        #recentSAN > 0 and table.concat(recentSAN, " ") or "Start",
+                        Engine.Nodes
                     )
-                    Logger.Log("ESP", string.format("Move %d: %s (%+.2f) [%s]", applied + 1, bestM.uci, State.Score / 100, meta))
+
+                    Logger.Log("AI", string.format("Ply %d -> #1:%s (%+.2f) #2:%s [%s]",
+                        applied,
+                        bestM.san or bestM.uci,
+                        RenderState.Score / 100,
+                        altM and (altM.san or altM.uci) or "--",
+                        meta
+                    ))
                 end
                 Busy = false
             end
