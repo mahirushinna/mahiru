@@ -1,35 +1,69 @@
--- File: RoChess_PureHook_GMAI_v2.lua
--- Runtime: Roblox LuaU (100% Memory/Signal/Metamethod Hook - NO VirtualInputManager)
+-- File: RoChess_PureHook_GMAI_v3_Logger.lua
+-- Runtime: Roblox LuaU (Delta / Android & PC Executors)
+-- Features: Toggleable Live Debug Log, Real InputObject __index Hook, GetMouseLocation Hook, Universal Packet Sniffer, GM AI v3
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
--- Cleanup previous instance if re-executed
-if _G.RoChessPureHookCleanup then
-    pcall(_G.RoChessPureHookCleanup)
+if _G.RoChessV3Cleanup then
+    pcall(_G.RoChessV3Cleanup)
 end
 
 --------------------------------------------------------------------------------
--- 1. ENGINE CONFIGURATION
+-- 1. LIVE DIAGNOSTIC LOGGER SYSTEM (TOGGLEABLE ON-SCREEN CONSOLE)
+--------------------------------------------------------------------------------
+local Logger = {
+    Lines = {},
+    MaxLines = 120,
+    Visible = true,
+    OnUpdate = nil
+}
+
+function Logger:Add(category, msg)
+    local timestamp = os.date("%H:%M:%S")
+    local formatted = string.format("[%s][%s] %s", timestamp, category, tostring(msg))
+    table.insert(self.Lines, formatted)
+    if #self.Lines > self.MaxLines then
+        table.remove(self.Lines, 1)
+    end
+    if self.OnUpdate then
+        pcall(self.OnUpdate)
+    end
+end
+
+function Logger:GetText()
+    return table.concat(self.Lines, "\n")
+end
+
+function Logger:Clear()
+    table.clear(self.Lines)
+    if self.OnUpdate then
+        pcall(self.OnUpdate)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- 2. CONFIGURATION & GRANDMASTER OPENING BOOK
 --------------------------------------------------------------------------------
 local Config = {
     AutoPlay = true,
     BaseSearchDepth = 4,
     MaxQuiescenceDepth = 6,
     SimulationsPerMove = 3,
-    SelectionHookDelay = 0.07, -- Wait for RoChess legal move dots to spawn on board
-    PostMoveCooldown = 0.55
+    SelectionHookDelay = 0.08,
+    PostMoveCooldown = 0.65
 }
 
 local FILES = { "a", "b", "c", "d", "e", "f", "g", "h" }
 local FILE_MAP = { a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8 }
 local PIECE_VALUES = { [1] = 100, [2] = 320, [3] = 335, [4] = 500, [5] = 950, [6] = 20000 }
 
--- PeSTO Middlegame & Endgame Piece-Square Tables (White perspective, rank 8 down to rank 1)
 local PST_MG = {
     [1] = {
           0,   0,   0,   0,   0,   0,   0,   0,
@@ -99,63 +133,53 @@ local KING_EG = {
      10,  17,  23,  15,  20,  45,  44,  13,
      -8,  22,  24,  27,  26,  33,  26,   3,
     -18,  -4,  21,  24,  27,  23,   9, -11,
-    -19,  -3,  11,  21,  23,  16,   7,  -9,
+    -19,  -3,  11,  21,  23,  16,   7, -9,
     -27, -11,   4,  13,  14,   4,  -5, -17,
     -53, -34, -21, -11, -28, -14, -24, -43
 }
 
---------------------------------------------------------------------------------
--- 2. GRANDMASTER OPENING BOOK (INCLUDES MODERN DEFENSE 1.e4 g6 FROM VIDEO 2)
---------------------------------------------------------------------------------
 local OpeningBook = {
     [""] = "e2e4",
-    -- Anti-Modern / Fianchetto Defense (1. e4 g6 & 2. g4 Bg7 in video_1.mp4!)
+    -- Anti-Scandinavian Check (1. e4 d5 2. Bb5+ from video_2.mp4!)
+    ["e2e4 d7d5 f1b5"] = "c7c6",
+    ["e2e4 d7d5 f1b5 c7c6 b5a4"] = "d5e4",
+    ["e2e4 d7d5"] = "e4d5",
+    ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
+    -- Anti-Modern / Fianchetto (1. e4 g6)
     ["e2e4 g7g6"] = "d2d4",
     ["e2e4 g7g6 d2d4 f8g7"] = "b1c3",
-    ["e2e4 g7g6 d2d4 f8g7 b1c3 d7d6"] = "f2f4",
     ["e2e4 g7g6 g2g4 f8g7"] = "d2d4",
-    ["e2e4 g7g6 g2g4 f8g7 d2d4 d7d6"] = "b1c3",
-    ["e2e4 g7g6 g2g4"] = "d7d5",
-    -- Anti-Lemming Defense (1. e4 Na6 in video 1)
+    -- Anti-Lemming (1. e4 Na6)
     ["e2e4 b8a6"] = "d2d4",
-    ["e2e4 b8a6 d2d4 c7c5"] = "d4d5",
-    ["e2e4 b8a6 f1c4 b4"] = "c2c3",
-    -- Open Games / Italian / Ruy Lopez / Scotch
+    -- Open Games
     ["e2e4 e7e5"] = "g1f3",
     ["e2e4 e7e5 g1f3 b8c6"] = "f1c4",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5"] = "c2c3",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 g8f6"] = "d2d4",
     ["e2e4 e7e5 g1f3 g8f6"] = "f3e5",
-    ["e2e4 e7e5 g1f3 d7d6"] = "d2d4",
-    -- Sicilian Defense
+    -- Sicilian
     ["e2e4 c7c5"] = "g1f3",
     ["e2e4 c7c5 g1f3 d7d6"] = "d2d4",
-    ["e2e4 c7c5 g1f3 d7d6 d2d4 c5d4"] = "f3d4",
     ["e2e4 c7c5 g1f3 b8c6"] = "d2d4",
     ["e2e4 c7c5 g1f3 e7e6"] = "d2d4",
-    -- French, Caro-Kann, Scandinavian, Pirc
+    -- French & Caro-Kann
     ["e2e4 e7e6"] = "d2d4",
     ["e2e4 e7e6 d2d4 d7d5"] = "b1c3",
     ["e2e4 c7c6"] = "d2d4",
     ["e2e4 c7c6 d2d4 d7d5"] = "b1c3",
-    ["e2e4 d7d5"] = "e4d5",
-    ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
-    ["e2e4 d7d6"] = "d2d4",
-    ["e2e4 d7d6 d2d4 g8f6"] = "b1c3",
-    -- Black Repertoire
+    -- Black responses to 1. e4 and 1. d4 (Match 2 in video_2.mp4: 1. d4!)
     ["e2e4"] = "c7c5",
-    ["e2e4 c7c5 g1f3"] = "d7d6",
-    ["e2e4 c7c5 b1c3"] = "b8c6",
-    ["e2e4 c7c5 f1c4"] = "e7e6",
     ["d2d4"] = "g8f6",
     ["d2d4 g8f6 c2c4"] = "e7e6",
+    ["d2d4 g8f6 b1c3"] = "d7d5",
+    ["d2d4 g8f6 g1f3"] = "d7d5",
     ["d2d4 d7d5 c2c4"] = "e7e6",
     ["c2c4"] = "e7e5",
     ["g1f3"] = "d7d5"
 }
 
 --------------------------------------------------------------------------------
--- 3. ZOBRIST HASHING & TRANSPOSITION TABLE
+-- 3. ZOBRIST HASHING & OPPONENT PROFILER
 --------------------------------------------------------------------------------
 local Zobrist = { PieceSq = {}, Side = 0x5F3759DF }
 do
@@ -176,9 +200,6 @@ end
 
 local TranspositionTable = {}
 
---------------------------------------------------------------------------------
--- 4. OPPONENT PROFILER AI
---------------------------------------------------------------------------------
 local OpponentProfile = {
     MoveCount = 0,
     BlunderCount = 0,
@@ -206,15 +227,15 @@ function OpponentProfile:RecordMove(evalDrop, isAggro)
     local aggroRate = self.AggressiveMoves / self.MoveCount
 
     if blunderRate >= 0.25 then
-        self.Archetype = "Blunder-Prone (Punish)"
+        self.Archetype = "Blunderer (Punish)"
         self.DynamicDepthBonus = 0
         self.ContemptFactor = 65
     elseif aggroRate >= 0.45 then
-        self.Archetype = "Aggressive Tactician"
+        self.Archetype = "Aggro Tactician"
         self.DynamicDepthBonus = 1
         self.ContemptFactor = 35
     elseif blunderRate < 0.08 and self.MoveCount >= 5 then
-        self.Archetype = "High-Elo / Solid"
+        self.Archetype = "Solid / High-Elo"
         self.DynamicDepthBonus = 1
         self.ContemptFactor = 0
     else
@@ -225,7 +246,7 @@ function OpponentProfile:RecordMove(evalDrop, isAggro)
 end
 
 --------------------------------------------------------------------------------
--- 5. CHESS ENGINE & STRICT RAYCAST GENERATOR
+-- 4. CHESS ENGINE & STRICT RAYCAST GENERATOR
 --------------------------------------------------------------------------------
 local ChessEngine = {}
 ChessEngine.__index = ChessEngine
@@ -561,9 +582,6 @@ function ChessEngine:GetLegalMoves(side, capturesOnly)
     return legal
 end
 
---------------------------------------------------------------------------------
--- 6. TAPERED PESTO EVALUATION + ZOBRIST ALPHA-BETA
---------------------------------------------------------------------------------
 function ChessEngine:Evaluate(aggressionBias)
     aggressionBias = aggressionBias or 1.0
     local b = self.Board
@@ -598,14 +616,12 @@ function ChessEngine:Evaluate(aggressionBias)
         end
     end
 
-    -- Bishop Pair Bonus
     if whiteBishops >= 2 then mgScore += 35; egScore += 50 end
     if blackBishops >= 2 then mgScore -= 35; egScore -= 50 end
 
     local mgWeight = math.min(phase, 24)
     local egWeight = 24 - mgWeight
     local tapered = (mgScore * mgWeight + egScore * egWeight) / 24
-
     return tapered * self.Turn
 end
 
@@ -702,7 +718,7 @@ end
 function ChessEngine:SelectBestMove(mySide)
     self.Turn = mySide
     local legalMoves = self:GetLegalMoves(mySide, false)
-    if #legalMoves == 0 then return nil, 0, "No Moves" end
+    if #legalMoves == 0 then return nil, 0, "No Legal Moves" end
     if #legalMoves == 1 then return legalMoves[1], 0, "Forced Move" end
 
     local historyKey = table.concat(self.MoveHistoryUCI, " ")
@@ -756,7 +772,7 @@ function ChessEngine:ParseSANMove(san, side)
         for _, m in ipairs(legal) do
             if m.isCastle == "WK" or m.isCastle == "BK" then return m end
         end
-    elseif san == "O-O-O" or san == "0-0-O" or san == "0-0-0" then
+    elseif san == "O-O-O" or san == "0-0-0" then
         for _, m in ipairs(legal) do
             if m.isCastle == "WQ" or m.isCastle == "BQ" then return m end
         end
@@ -796,344 +812,345 @@ function ChessEngine:ParseSANMove(san, side)
 end
 
 --------------------------------------------------------------------------------
--- 7. 100% PURE HOOK ENGINE (NO VIRTUALINPUTMANAGER / NO TOUCH SIMULATION)
+-- 5. PURE HOOK ENGINE v3 (REAL INPUTOBJECT __INDEX + __NAMECALL + GETGUIATPOS)
 --------------------------------------------------------------------------------
 local HookState = {
     CapturedRemote = nil,
-    CapturedFormat = nil,
-    GCBoardController = nil,
-    GCMoveFunction = nil,
-    LastHookMethod = "Standby"
+    CapturedSchema = nil, -- "TWO_STRINGS", "UCI_STRING", "ACTION_TWO_STRINGS", "TABLE_FROM_TO", "NUMERIC_PAIR"
+    CapturedActionPrefix = nil,
+    GCMoveFunctions = {},
+    CandidateRemotes = {},
+    RealInputObject = nil,
+    SpoofActive = false,
+    SpoofX = 0,
+    SpoofY = 0,
+    SpoofState = Enum.UserInputState.Begin,
+    SpoofType = Enum.UserInputType.Touch,
+    LastHookSummary = "Init"
 }
 
--- 7.1 Deep GC & Module Scanner for RoChess internal functions & Remotes
-local function ScanGarbageCollectorForHooks()
-    if not getgc then return end
+-- Capture a genuine C++ InputObject instance from UserInputService immediately
+local inputCaptureConn
+inputCaptureConn = UserInputService.InputBegan:Connect(function(input)
+    if typeof(input) == "Instance" and input:IsA("InputObject") and not HookState.RealInputObject then
+        HookState.RealInputObject = input
+        Logger:Add("HOOK", "Captured genuine C++ InputObject instance!")
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if typeof(input) == "Instance" and input:IsA("InputObject") and not HookState.RealInputObject then
+        HookState.RealInputObject = input
+    end
+end)
+
+local function SerializeArg(v, depth)
+    depth = depth or 0
+    if depth > 2 then return "..." end
+    if type(v) == "string" then
+        return '"' .. v .. '"'
+    elseif type(v) == "number" or type(v) == "boolean" then
+        return tostring(v)
+    elseif typeof(v) == "Instance" then
+        return v.ClassName .. ":" .. v.Name
+    elseif type(v) == "table" then
+        local parts = {}
+        local count = 0
+        for k, val in pairs(v) do
+            count += 1
+            if count <= 6 then
+                table.insert(parts, tostring(k) .. "=" .. SerializeArg(val, depth + 1))
+            end
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    return tostring(v)
+end
+
+-- Install Metamethod Hooks (__index for InputObject/Mouse spoofing & __namecall for Remote/MouseLocation)
+local PlayerMouse = LocalPlayer:GetMouse()
+
+if hookmetamethod and getnamecallmethod then
     pcall(function()
-        for _, obj in ipairs(getgc(true)) do
-            if type(obj) == "table" then
-                local moveFn = rawget(obj, "MakeMove") or rawget(obj, "MovePiece") or rawget(obj, "TryMove") or rawget(obj, "SubmitMove") or rawget(obj, "sendMove") or rawget(obj, "makeMove")
-                if type(moveFn) == "function" then
-                    HookState.GCBoardController = obj
-                    HookState.GCMoveFunction = moveFn
+        local oldIndex
+        oldIndex = hookmetamethod(game, "__index", function(self, key)
+            if HookState.SpoofActive then
+                if self == HookState.RealInputObject then
+                    if key == "Position" then
+                        return Vector3.new(HookState.SpoofX, HookState.SpoofY, 0)
+                    elseif key == "UserInputState" then
+                        return HookState.SpoofState
+                    elseif key == "UserInputType" then
+                        return HookState.SpoofType
+                    elseif key == "Delta" then
+                        return Vector3.zero
+                    end
+                elseif self == PlayerMouse then
+                    if key == "X" then return HookState.SpoofX
+                    elseif key == "Y" then return HookState.SpoofY
+                    end
                 end
-            elseif type(obj) == "function" and islclosure and islclosure(obj) and not isexecutorclosure(obj) then
-                if debug and debug.getupvalues then
-                    local ok, upvals = pcall(debug.getupvalues, obj)
-                    if ok and upvals then
-                        for _, uv in pairs(upvals) do
-                            if typeof(uv) == "Instance" and (uv:IsA("RemoteEvent") or uv:IsA("RemoteFunction")) then
-                                local n = string.lower(uv.Name)
-                                if string.find(n, "move") or string.find(n, "chess") or string.find(n, "game") or string.find(n, "play") then
-                                    HookState.CapturedRemote = HookState.CapturedRemote or uv
+            end
+            return oldIndex(self, key)
+        end)
+
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+
+            -- Spoof UserInputService:GetMouseLocation() during hook dispatch
+            if HookState.SpoofActive and self == UserInputService and method == "GetMouseLocation" then
+                local inset = GuiService:GetGuiInset()
+                return Vector2.new(HookState.SpoofX, HookState.SpoofY + inset.Y)
+            end
+
+            -- Intercept and log outgoing Remote calls to auto-learn RoChess packet structure
+            if (method == "FireServer" or method == "InvokeServer") and not checkcaller() then
+                local args = { ... }
+                local remName = tostring(self.Name)
+                local remLower = string.lower(remName)
+
+                if not string.find(remLower, "ping") and not string.find(remLower, "time") and not string.find(remLower, "tick") then
+                    local argDump = {}
+                    for i = 1, math.min(#args, 5) do
+                        table.insert(argDump, SerializeArg(args[i], 0))
+                    end
+                    Logger:Add("NET", string.format("%s:%s(%s)", remName, method, table.concat(argDump, ", ")))
+
+                    -- Auto-detect move packet schema
+                    if #args >= 2 and type(args[1]) == "string" and type(args[2]) == "string" and AlgebraicToIndex(args[1]) and AlgebraicToIndex(args[2]) then
+                        HookState.CapturedRemote = self
+                        HookState.CapturedSchema = "TWO_STRINGS"
+                        Logger:Add("LOCK", "Locked Remote Schema: TWO_STRINGS on " .. remName)
+                    elseif #args >= 3 and type(args[1]) == "string" and type(args[2]) == "string" and type(args[3]) == "string" and AlgebraicToIndex(args[2]) and AlgebraicToIndex(args[3]) then
+                        HookState.CapturedRemote = self
+                        HookState.CapturedSchema = "ACTION_TWO_STRINGS"
+                        HookState.CapturedActionPrefix = args[1]
+                        Logger:Add("LOCK", "Locked Remote Schema: ACTION_TWO_STRINGS (" .. args[1] .. ") on " .. remName)
+                    elseif #args >= 1 and type(args[1]) == "string" and #args[1] >= 4 and AlgebraicToIndex(string.sub(args[1], 1, 2)) and AlgebraicToIndex(string.sub(args[1], 3, 4)) then
+                        HookState.CapturedRemote = self
+                        HookState.CapturedSchema = "UCI_STRING"
+                        Logger:Add("LOCK", "Locked Remote Schema: UCI_STRING on " .. remName)
+                    elseif #args >= 1 and type(args[1]) == "table" then
+                        local t = args[1]
+                        if t.from or t.From or t.to or t.To or t.move or t.Move or t.startSquare or t.endSquare then
+                            HookState.CapturedRemote = self
+                            HookState.CapturedSchema = "TABLE_FROM_TO"
+                            Logger:Add("LOCK", "Locked Remote Schema: TABLE_FROM_TO on " .. remName)
+                        end
+                    elseif #args >= 2 and type(args[1]) == "number" and type(args[2]) == "number" and args[1] >= 0 and args[1] <= 64 and args[2] >= 0 and args[2] <= 64 then
+                        HookState.CapturedRemote = self
+                        HookState.CapturedSchema = "NUMERIC_PAIR"
+                        Logger:Add("LOCK", "Locked Remote Schema: NUMERIC_PAIR on " .. remName)
+                    end
+                end
+            end
+
+            return oldNamecall(self, ...)
+        end)
+        Logger:Add("INIT", "Installed __index & __namecall Metamethod Hooks.")
+    end)
+else
+    Logger:Add("WARN", "Executor missing hookmetamethod/getnamecallmethod!")
+end
+
+-- Deep Game Scanner: Scans ReplicatedStorage Remotes + GC Functions & Tables
+local function ScanGameForHooks()
+    table.clear(HookState.CandidateRemotes)
+    table.clear(HookState.GCMoveFunctions)
+
+    for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+        if desc:IsA("RemoteEvent") or desc:IsA("RemoteFunction") then
+            local n = string.lower(desc.Name)
+            if string.find(n, "move") or string.find(n, "chess") or string.find(n, "game") or string.find(n, "piece") or string.find(n, "play") or string.find(n, "action") then
+                table.insert(HookState.CandidateRemotes, desc)
+            end
+        end
+    end
+
+    if getgc then
+        pcall(function()
+            for _, obj in ipairs(getgc(true)) do
+                if type(obj) == "table" then
+                    for _, fnName in ipairs({ "MakeMove", "MovePiece", "TryMove", "SubmitMove", "sendMove", "makeMove", "SelectSquare", "OnSquareClick", "handleSquareClick", "onSquareInput" }) do
+                        local fn = rawget(obj, fnName)
+                        if type(fn) == "function" then
+                            table.insert(HookState.GCMoveFunctions, { name = fnName, fn = fn, selfTable = obj })
+                        end
+                    end
+                elseif type(obj) == "function" and islclosure and islclosure(obj) then
+                    if not isexecutorclosure or not isexecutorclosure(obj) then
+                        if debug and debug.getconstants then
+                            local ok, consts = pcall(debug.getconstants, obj)
+                            if ok and consts then
+                                local hasMove, hasChess = false, false
+                                for _, c in pairs(consts) do
+                                    if type(c) == "string" then
+                                        local cl = string.lower(c)
+                                        if cl == "makemove" or cl == "movepiece" or cl == "trymove" or cl == "promotion" then
+                                            hasMove = true
+                                        elseif cl == "checkmate" or cl == "stalemate" or cl == "enpassant" or cl == "castling" then
+                                            hasChess = true
+                                        end
+                                    end
+                                end
+                                if hasMove and hasChess and debug.getupvalues then
+                                    local okUv, uvs = pcall(debug.getupvalues, obj)
+                                    if okUv and uvs then
+                                        for _, uv in pairs(uvs) do
+                                            if typeof(uv) == "Instance" and (uv:IsA("RemoteEvent") or uv:IsA("RemoteFunction")) then
+                                                HookState.CapturedRemote = HookState.CapturedRemote or uv
+                                                Logger:Add("GC", "Found Chess Upvalue Remote: " .. uv:GetFullName())
+                                            end
+                                        end
+                                    end
                                 end
                             end
                         end
                     end
                 end
             end
-        end
-    end)
-end
-task.spawn(ScanGarbageCollectorForHooks)
-
--- 7.2 Metamethod __namecall Hook to intercept any move packet structure
-if hookmetamethod and getnamecallmethod then
-    pcall(function()
-        local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer") and not checkcaller() then
-                local args = { ... }
-                local n = string.lower(self.Name)
-                if string.find(n, "move") or string.find(n, "piece") or string.find(n, "turn") then
-                    HookState.CapturedRemote = self
-                    HookState.CapturedFormat = args
-                elseif #args >= 1 then
-                    if type(args[1]) == "string" and (#args[1] == 2 or #args[1] == 4) then
-                        HookState.CapturedRemote = self
-                        HookState.CapturedFormat = args
-                    elseif type(args[1]) == "table" and (args[1].from or args[1].From or args[1].to or args[1].To or args[1].move) then
-                        HookState.CapturedRemote = self
-                        HookState.CapturedFormat = args
-                    end
-                end
-            end
-            return oldNamecall(self, ...)
         end)
-    end)
+    end
+
+    Logger:Add("SCAN", string.format("Remotes: %d | GC MoveFns: %d | LockedRemote: %s",
+        #HookState.CandidateRemotes,
+        #HookState.GCMoveFunctions,
+        HookState.CapturedRemote and HookState.CapturedRemote.Name or "None"
+    ))
 end
 
--- 7.3 Locate the 8x8 Board Container Frame accurately
+--------------------------------------------------------------------------------
+-- 6. BOARD FRAME, ACTIVE CLOCK PILL & TURN/COLOR DETECTOR (FIXES VIDEO 2 BUGS)
+--------------------------------------------------------------------------------
+local OurScreenGui = nil
+
+-- Finds the 8x8 Board Container that actually has the most child squares/pieces
 local function GetBoardFrame()
-    local bestFrame = nil
-    local bestArea = 0
+    local candidates = {}
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
-        if desc:IsA("GuiObject") and desc.Visible then
+        if desc:IsA("GuiObject") and desc.Visible and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
             local sz = desc.AbsoluteSize
-            -- Board frame is a large square (width == height, >= 220px)
-            if sz.X >= 220 and sz.Y >= 220 and math.abs(sz.X - sz.Y) <= 16 then
-                local area = sz.X * sz.Y
-                if area > bestArea then
-                    bestArea = area
-                    bestFrame = desc
+            if sz.X >= 220 and sz.Y >= 220 and math.abs(sz.X - sz.Y) <= 18 then
+                local childGuiCount = 0
+                for _, ch in ipairs(desc:GetDescendants()) do
+                    if ch:IsA("GuiObject") then childGuiCount += 1 end
                 end
-            end
-        end
-    end
-    return bestFrame
-end
-
--- 7.4 Pure Memory Signal Hook on any GuiObject (NO screen touch, NO VirtualInputManager)
-local function FireGuiObjectHooks(guiObj, screenX, screenY)
-    local firedCount = 0
-    local fakeTouchBegin = {
-        UserInputType = Enum.UserInputType.Touch,
-        UserInputState = Enum.UserInputState.Begin,
-        Position = Vector3.new(screenX, screenY, 0),
-        Delta = Vector3.zero,
-        KeyCode = Enum.KeyCode.Unknown
-    }
-    local fakeTouchEnd = {
-        UserInputType = Enum.UserInputType.Touch,
-        UserInputState = Enum.UserInputState.End,
-        Position = Vector3.new(screenX, screenY, 0),
-        Delta = Vector3.zero,
-        KeyCode = Enum.KeyCode.Unknown
-    }
-    local fakeMouseBegin = {
-        UserInputType = Enum.UserInputType.MouseButton1,
-        UserInputState = Enum.UserInputState.Begin,
-        Position = Vector3.new(screenX, screenY, 0),
-        Delta = Vector3.zero,
-        KeyCode = Enum.KeyCode.Unknown
-    }
-    local fakeMouseEnd = {
-        UserInputType = Enum.UserInputType.MouseButton1,
-        UserInputState = Enum.UserInputState.End,
-        Position = Vector3.new(screenX, screenY, 0),
-        Delta = Vector3.zero,
-        KeyCode = Enum.KeyCode.Unknown
-    }
-
-    -- Use firesignal if supported by executor
-    if firesignal then
-        for _, sigName in ipairs({ "Activated", "MouseButton1Down", "MouseButton1Click", "MouseButton1Up", "TouchTap" }) do
-            local ok, sig = pcall(function() return guiObj[sigName] end)
-            if ok and sig then
-                pcall(firesignal, sig)
-                pcall(firesignal, sig, screenX, screenY)
-                firedCount += 1
+                table.insert(candidates, { frame = desc, area = sz.X * sz.Y, children = childGuiCount })
             end
         end
     end
 
-    -- Use getconnections to invoke bound Lua closures directly in memory
-    if getconnections then
-        local buttonSigs = { "Activated", "MouseButton1Down", "MouseButton1Click", "MouseButton1Up", "TouchTap" }
-        for _, sigName in ipairs(buttonSigs) do
-            local ok, sig = pcall(function() return guiObj[sigName] end)
-            if ok and sig then
-                local okConn, conns = pcall(getconnections, sig)
-                if okConn and conns then
-                    for _, c in ipairs(conns) do
-                        if c.Function then
-                            pcall(task.spawn, c.Function, screenX, screenY)
-                            pcall(task.spawn, c.Function)
-                            firedCount += 1
-                        end
-                        pcall(function() c:Fire(screenX, screenY) end)
-                        pcall(function() c:Fire() end)
-                    end
-                end
-            end
+    table.sort(candidates, function(a, b)
+        if a.children ~= b.children then
+            return a.children > b.children
         end
-
-        local inputSigs = {
-            { name = "InputBegan", payloads = { fakeTouchBegin, fakeMouseBegin } },
-            { name = "InputEnded", payloads = { fakeTouchEnd, fakeMouseEnd } }
-        }
-        for _, entry in ipairs(inputSigs) do
-            local ok, sig = pcall(function() return guiObj[entry.name] end)
-            if ok and sig then
-                local okConn, conns = pcall(getconnections, sig)
-                if okConn and conns then
-                    for _, c in ipairs(conns) do
-                        for _, payload in ipairs(entry.payloads) do
-                            if c.Function then
-                                pcall(task.spawn, c.Function, payload, false)
-                                firedCount += 1
-                            end
-                            pcall(function() c:Fire(payload, false) end)
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    return firedCount
-end
-
--- Collects all GuiObjects inside the BoardFrame whose bounding box covers (targetX, targetY)
-local function GetSquareGuiTargetsAt(boardFrame, targetX, targetY, algName)
-    local targets = {}
-    local seen = {}
-
-    for _, desc in ipairs(boardFrame:GetDescendants()) do
-        if desc:IsA("GuiObject") and desc.Visible then
-            local n = string.lower(desc.Name)
-            local pos = desc.AbsolutePosition
-            local sz = desc.AbsoluteSize
-            local isNamedMatch = (n == algName or n == "square_" .. algName or n == "tile_" .. algName)
-            local isCoordMatch = (
-                targetX >= pos.X and targetX <= (pos.X + sz.X) and
-                targetY >= pos.Y and targetY <= (pos.Y + sz.Y) and
-                sz.X <= (boardFrame.AbsoluteSize.X * 0.25)
-            )
-
-            if (isNamedMatch or isCoordMatch) and not seen[desc] then
-                seen[desc] = true
-                table.insert(targets, desc)
-                if desc.Parent and desc.Parent:IsA("GuiObject") and desc.Parent ~= boardFrame and not seen[desc.Parent] then
-                    seen[desc.Parent] = true
-                    table.insert(targets, desc.Parent)
-                end
-            end
-        end
-    end
-
-    -- Sort deepest/topmost children (like newly spawned legal-move indicator dots!) first
-    table.sort(targets, function(a, b)
-        return a.ZIndex > b.ZIndex
+        return a.area > b.area
     end)
 
-    return targets
+    return candidates[1] and candidates[1].frame or nil
 end
 
-local function ComputeSquareScreenCenter(boardFrame, sqIdx, mySide)
-    local file, rank = IndexToFileRank(sqIdx)
-    local col, row
-    if mySide == 1 then
-        col = file - 1
-        row = 8 - rank
-    else
-        col = 8 - file
-        row = rank - 1
-    end
-    local bPos = boardFrame.AbsolutePosition
-    local bSize = boardFrame.AbsoluteSize
-    local cellW, cellH = bSize.X / 8, bSize.Y / 8
-    return bPos.X + (col + 0.5) * cellW, bPos.Y + (row + 0.5) * cellH
-end
+-- Detects which clock pill (Top vs Bottom) has the bright white active background or "to move" badge
+-- In video_1.mp4 & video_2.mp4: Active clock pill is RGB(255,255,255), inactive clock is dark!
+local function DetectTurnAndMatchState(boardFrame)
+    if not boardFrame then return "NO_BOARD" end
+    local boardCenterY = boardFrame.AbsolutePosition.Y + (boardFrame.AbsoluteSize.Y * 0.5)
+    local boardTopY = boardFrame.AbsolutePosition.Y
+    local boardBottomY = boardFrame.AbsolutePosition.Y + boardFrame.AbsoluteSize.Y
 
--- Executes a move using 100% Hook Simulation (Remote Hook + GC Function Hook + Two-Phase Signal Hook)
-local function ExecuteMoveViaHook(move, mySide)
-    local fromAlg = IndexToAlgebraic(move.from)
-    local toAlg = IndexToAlgebraic(move.to)
-    local uci = fromAlg .. toAlg
-    local totalHooksFired = 0
-
-    -- Stage 1: Direct Remote Hook if captured
-    if HookState.CapturedRemote then
-        pcall(function()
-            local rem = HookState.CapturedRemote
-            if rem:IsA("RemoteEvent") then
-                if HookState.CapturedFormat and type(HookState.CapturedFormat[1]) == "table" then
-                    rem:FireServer({ from = fromAlg, to = toAlg, promotion = "q", From = fromAlg, To = toAlg })
-                elseif HookState.CapturedFormat and type(HookState.CapturedFormat[1]) == "string" and #HookState.CapturedFormat[1] == 4 then
-                    rem:FireServer(uci)
-                else
-                    rem:FireServer(fromAlg, toAlg, "q")
+    -- Check if "Game Aborted" / "You Lost" / "You Won" modal is covering the board
+    for _, desc in ipairs(PlayerGui:GetDescendants()) do
+        if desc:IsA("TextLabel") and desc.Visible and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
+            local t = string.lower(desc.Text)
+            if t == "game aborted" or string.find(t, "you lost") or string.find(t, "you won") or string.find(t, "searching for opponent") then
+                if desc.AbsolutePosition.Y < boardBottomY + 120 then
+                    return "INACTIVE_OR_MODAL"
                 end
-                HookState.LastHookMethod = "Remote:" .. rem.Name
-                totalHooksFired += 1
-            elseif rem:IsA("RemoteFunction") then
-                task.spawn(function()
-                    rem:InvokeServer(fromAlg, toAlg, "q")
-                end)
-                HookState.LastHookMethod = "RemoteFn:" .. rem.Name
-                totalHooksFired += 1
             end
-        end)
+        end
     end
 
-    -- Stage 2: Direct GC Controller Function Hook
-    if HookState.GCMoveFunction then
-        pcall(function()
-            if HookState.GCBoardController then
-                HookState.GCMoveFunction(HookState.GCBoardController, fromAlg, toAlg, "q")
-            else
-                HookState.GCMoveFunction(fromAlg, toAlg, "q")
+    -- 1. Check explicit "to move" badge
+    for _, desc in ipairs(PlayerGui:GetDescendants()) do
+        if desc:IsA("TextLabel") and desc.Visible and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
+            local t = string.lower(desc.Text)
+            if string.find(t, "to move") then
+                if desc.AbsolutePosition.Y > boardCenterY then
+                    return "MY_TURN"
+                else
+                    return "OPPONENT_TURN"
+                end
             end
-            HookState.LastHookMethod = "GC:MoveFn"
-            totalHooksFired += 1
-        end)
+        end
     end
 
-    -- Stage 3: Two-Phase Pure Signal Hook on Board GUI Squares & Spawned Legal-Move Dots
-    local boardFrame = GetBoardFrame()
-    if boardFrame then
-        local fx, fy = ComputeSquareScreenCenter(boardFrame, move.from, mySide)
-        local tx, ty = ComputeSquareScreenCenter(boardFrame, move.to, mySide)
-
-        -- Phase 3A: Hook source square/piece (`fromAlg`) to trigger RoChess piece selection
-        local fromTargets = GetSquareGuiTargetsAt(boardFrame, fx, fy, fromAlg)
-        for _, obj in ipairs(fromTargets) do
-            totalHooksFired += FireGuiObjectHooks(obj, fx, fy)
-        end
-        FireGuiObjectHooks(boardFrame, fx, fy)
-
-        -- Wait for RoChess to spawn the legal-move target dots (fixes the 00:29 bug in video_1.mp4!)
-        task.wait(Config.SelectionHookDelay)
-
-        -- Phase 3B: Re-scan destination square (`toAlg`) to capture newly spawned legal-move dot & square
-        local toTargets = GetSquareGuiTargetsAt(boardFrame, tx, ty, toAlg)
-        for _, obj in ipairs(toTargets) do
-            totalHooksFired += FireGuiObjectHooks(obj, tx, ty)
-        end
-        FireGuiObjectHooks(boardFrame, tx, ty)
-
-        -- Phase 3C: Auto-hook Queen promotion popup if pawn promoted
-        if move.promo then
-            task.wait(0.08)
-            for _, desc in ipairs(boardFrame.Parent:GetDescendants()) do
-                if desc:IsA("GuiButton") and desc.Visible then
-                    local n = string.lower(desc.Name)
-                    if string.find(n, "queen") or n == "q" then
-                        FireGuiObjectHooks(desc, desc.AbsolutePosition.X + 10, desc.AbsolutePosition.Y + 10)
+    -- 2. Check Bright White Clock Pill (e.g. "3:00", "2:57", "0:45") above vs below board
+    for _, desc in ipairs(PlayerGui:GetDescendants()) do
+        if desc:IsA("TextLabel") and desc.Visible and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
+            local txt = string.gsub(desc.Text, "%s+", "")
+            if string.match(txt, "^%d+:%d%d$") then
+                -- Check background of the clock label or its parent pill Frame
+                local pill = desc.BackgroundTransparency < 0.5 and desc or desc.Parent
+                if pill and pill:IsA("GuiObject") and pill.BackgroundTransparency < 0.8 then
+                    local col = pill.BackgroundColor3
+                    if col.R > 0.75 and col.G > 0.75 and col.B > 0.75 then
+                        if desc.AbsolutePosition.Y > boardCenterY then
+                            return "MY_TURN"
+                        elseif desc.AbsolutePosition.Y < boardTopY then
+                            return "OPPONENT_TURN"
+                        end
                     end
                 end
             end
         end
-
-        HookState.LastHookMethod = string.format("SignalHook (%d)", totalHooksFired)
     end
+
+    return "UNKNOWN"
 end
 
---------------------------------------------------------------------------------
--- 8. STRICT LOWER-PANEL MOVE SCRAPER & LIVE TURN DETECTOR (FIXES 00:41 BUG)
---------------------------------------------------------------------------------
-local function DetectPlayerColor(boardFrame)
-    if not boardFrame then return 1 end
-    local rank1Y, rank8Y = nil, nil
-    for _, desc in ipairs(boardFrame:GetDescendants()) do
-        if desc:IsA("TextLabel") and desc.Visible then
-            local txt = string.gsub(desc.Text, "%s+", "")
-            if txt == "1" and desc.AbsoluteSize.X < 40 then
-                rank1Y = desc.AbsolutePosition.Y
-            elseif txt == "8" and desc.AbsoluteSize.X < 40 then
-                rank8Y = desc.AbsolutePosition.Y
+-- Detects whether LocalPlayer is White (1) or Black (-1) using:
+-- 1) Active turn clock parity + move count parity (100% exact in video_2.mp4!)
+-- 2) Rank "1" vs "8" coordinates near the left edge of the board
+local LockedMatchSide = nil
+
+local function DetectPlayerColor(boardFrame, turnState, engineTurn)
+    if turnState == "MY_TURN" then
+        LockedMatchSide = engineTurn
+        return engineTurn
+    elseif turnState == "OPPONENT_TURN" then
+        LockedMatchSide = -engineTurn
+        return -engineTurn
+    end
+
+    if LockedMatchSide then
+        return LockedMatchSide
+    end
+
+    if boardFrame then
+        local bLeft = boardFrame.AbsolutePosition.X
+        local bTop = boardFrame.AbsolutePosition.Y
+        local bBottom = bTop + boardFrame.AbsoluteSize.Y
+        local rank1Y, rank8Y = nil, nil
+
+        for _, desc in ipairs(PlayerGui:GetDescendants()) do
+            if desc:IsA("TextLabel") and desc.Visible and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
+                local pos = desc.AbsolutePosition
+                if math.abs(pos.X - bLeft) <= 35 and pos.Y >= (bTop - 10) and pos.Y <= (bBottom + 10) then
+                    local txt = string.gsub(desc.Text, "%s+", "")
+                    if txt == "1" then rank1Y = pos.Y
+                    elseif txt == "8" then rank8Y = pos.Y
+                    end
+                end
             end
         end
+        if rank1Y and rank8Y then
+            return (rank1Y > rank8Y) and 1 or -1
+        end
     end
-    if rank1Y and rank8Y then
-        return (rank1Y > rank8Y) and 1 or -1
-    end
+
     return 1
 end
 
--- Strictly scrapes ONLY the move history panel below the board frame (ignores board labels!)
 local function ScrapeMoveListStrictlyBelowBoard(boardFrame)
     if not boardFrame then return {} end
     local boardBottomY = boardFrame.AbsolutePosition.Y + boardFrame.AbsoluteSize.Y - 4
@@ -1141,25 +1158,25 @@ local function ScrapeMoveListStrictlyBelowBoard(boardFrame)
 
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
         if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and desc.Visible then
-            local pos = desc.AbsolutePosition
-            -- Must be strictly below the 8x8 board frame! (Fixes the bug where board square labels broke SAN parsing)
-            if pos.Y >= boardBottomY and desc.AbsoluteSize.Y > 8 and desc.AbsoluteSize.Y < 45 then
-                local clean = string.gsub(desc.Text, "<[^>]+>", "")
-                clean = string.gsub(clean, "^%s*(.-)%s*$", "%1")
+            if not OurScreenGui or not desc:IsDescendantOf(OurScreenGui) then
+                local pos = desc.AbsolutePosition
+                if pos.Y >= boardBottomY and desc.AbsoluteSize.Y > 8 and desc.AbsoluteSize.Y < 45 then
+                    local clean = string.gsub(desc.Text, "<[^>]+>", "")
+                    clean = string.gsub(clean, "^%s*(.-)%s*$", "%1")
 
-                -- Support both individual move labels ("e4", "g6", "Bg7") and combined row strings ("1. e4 g6")
-                for token in string.gmatch(clean, "%S+") do
-                    if not string.match(token, "^%d+%.+$") then
-                        local stripped = string.gsub(token, "[+#!?]", "")
-                        if
-                            stripped == "O-O" or stripped == "O-O-O" or
-                            string.match(stripped, "^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8]=?[QRNB]?$")
-                        then
-                            table.insert(rawTokens, {
-                                san = stripped,
-                                rowY = math.floor(pos.Y / 8) * 8,
-                                colX = pos.X
-                            })
+                    for token in string.gmatch(clean, "%S+") do
+                        if not string.match(token, "^%d+%.+$") then
+                            local stripped = string.gsub(token, "[+#!?]", "")
+                            if
+                                stripped == "O-O" or stripped == "O-O-O" or
+                                string.match(stripped, "^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8]=?[QRNB]?$")
+                            then
+                                table.insert(rawTokens, {
+                                    san = stripped,
+                                    rowY = math.floor(pos.Y / 8) * 8,
+                                    colX = pos.X
+                                })
+                            end
                         end
                     end
                 end
@@ -1174,7 +1191,6 @@ local function ScrapeMoveListStrictlyBelowBoard(boardFrame)
         return a.colX < b.colX
     end)
 
-    -- Deduplicate overlapping TextButton + child TextLabel at the same screen position
     local deduped = {}
     for _, item in ipairs(rawTokens) do
         local prev = deduped[#deduped]
@@ -1190,184 +1206,560 @@ local function ScrapeMoveListStrictlyBelowBoard(boardFrame)
     return result
 end
 
--- Detects if the "Xs to move" badge in video_1.mp4 (00:00, 00:26, 00:40) is on our bottom bar or opponent's top bar
-local function DetectTurnBadgeState(boardFrame)
-    if not boardFrame then return nil end
-    local boardCenterY = boardFrame.AbsolutePosition.Y + (boardFrame.AbsoluteSize.Y * 0.5)
+--------------------------------------------------------------------------------
+-- 7. MULTI-STAGE HOOK DISPATCHER (WITH DETAILED DIAGNOSTIC LOGGING)
+--------------------------------------------------------------------------------
+local function ComputeSquareScreenCenter(boardFrame, sqIdx, mySide)
+    local file, rank = IndexToFileRank(sqIdx)
+    local col, row
+    if mySide == 1 then
+        col = file - 1
+        row = 8 - rank
+    else
+        col = 8 - file
+        row = rank - 1
+    end
+    local bPos = boardFrame.AbsolutePosition
+    local bSize = boardFrame.AbsoluteSize
+    local cellW, cellH = bSize.X / 8, bSize.Y / 8
+    return math.floor(bPos.X + (col + 0.5) * cellW), math.floor(bPos.Y + (row + 0.5) * cellH)
+end
+
+-- Uses native PlayerGui:GetGuiObjectsAtPosition(x, y) + fallback bounding box scan
+local function GetAllGuiObjectsAtScreenPoint(x, y)
+    local list = {}
+    local seen = {}
+
+    local ok, nativeHits = pcall(function()
+        return PlayerGui:GetGuiObjectsAtPosition(x, y)
+    end)
+    if ok and nativeHits then
+        for _, obj in ipairs(nativeHits) do
+            if not OurScreenGui or not obj:IsDescendantOf(OurScreenGui) then
+                seen[obj] = true
+                table.insert(list, obj)
+            end
+        end
+    end
+
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
-        if desc:IsA("TextLabel") and desc.Visible then
-            local txt = string.lower(desc.Text)
-            if string.find(txt, "to move") then
-                if desc.AbsolutePosition.Y > boardCenterY then
-                    return "MY_TURN"
-                else
-                    return "OPPONENT_TURN"
+        if desc:IsA("GuiObject") and desc.Visible and not seen[desc] then
+            if not OurScreenGui or not desc:IsDescendantOf(OurScreenGui) then
+                local pos = desc.AbsolutePosition
+                local sz = desc.AbsoluteSize
+                if x >= pos.X and x <= (pos.X + sz.X) and y >= pos.Y and y <= (pos.Y + sz.Y) then
+                    seen[desc] = true
+                    table.insert(list, desc)
                 end
             end
         end
     end
-    return nil
+
+    return list
+end
+
+local function FireHooksAtPoint(x, y, labelTag)
+    HookState.SpoofActive = true
+    HookState.SpoofX = x
+    HookState.SpoofY = y
+
+    local hitObjects = GetAllGuiObjectsAtScreenPoint(x, y)
+    local topNames = {}
+    for i = 1, math.min(3, #hitObjects) do
+        table.insert(topNames, hitObjects[i].ClassName .. ":" .. hitObjects[i].Name)
+    end
+
+    local signalFires = 0
+    local connFires = 0
+
+    local fakeTableBegin = {
+        UserInputType = Enum.UserInputType.Touch,
+        UserInputState = Enum.UserInputState.Begin,
+        Position = Vector3.new(x, y, 0),
+        Delta = Vector3.zero,
+        KeyCode = Enum.KeyCode.Unknown
+    }
+    local fakeTableEnd = {
+        UserInputType = Enum.UserInputType.Touch,
+        UserInputState = Enum.UserInputState.End,
+        Position = Vector3.new(x, y, 0),
+        Delta = Vector3.zero,
+        KeyCode = Enum.KeyCode.Unknown
+    }
+
+    local inputPayloadBegin = HookState.RealInputObject or fakeTableBegin
+    local inputPayloadEnd = HookState.RealInputObject or fakeTableEnd
+
+    for _, obj in ipairs(hitObjects) do
+        -- 1. Button signals if obj is a GuiButton (TextButton / ImageButton)
+        if obj:IsA("GuiButton") then
+            for _, sigName in ipairs({ "Activated", "MouseButton1Down", "MouseButton1Click", "MouseButton1Up", "TouchTap" }) do
+                local okSig, sig = pcall(function() return obj[sigName] end)
+                if okSig and sig then
+                    if firesignal then
+                        pcall(firesignal, sig)
+                        pcall(firesignal, sig, x, y)
+                        signalFires += 1
+                    end
+                    if getconnections then
+                        local okC, conns = pcall(getconnections, sig)
+                        if okC and conns then
+                            for _, c in ipairs(conns) do
+                                connFires += 1
+                                if c.Function then pcall(task.spawn, c.Function, x, y) end
+                                pcall(function() c:Fire(x, y) end)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 2. GuiObject InputBegan / InputEnded / TouchTap signals
+        HookState.SpoofState = Enum.UserInputState.Begin
+        HookState.SpoofType = Enum.UserInputType.Touch
+
+        if getconnections then
+            local okIn, connsIn = pcall(getconnections, obj.InputBegan)
+            if okIn and connsIn then
+                for _, c in ipairs(connsIn) do
+                    connFires += 1
+                    if c.Function then pcall(task.spawn, c.Function, inputPayloadBegin, false) end
+                    pcall(function() c:Fire(inputPayloadBegin, false) end)
+                end
+            end
+
+            local okTap, connsTap = pcall(getconnections, obj.TouchTap)
+            if okTap and connsTap then
+                for _, c in ipairs(connsTap) do
+                    connFires += 1
+                    if c.Function then pcall(task.spawn, c.Function, { Vector2.new(x, y) }) end
+                    pcall(function() c:Fire({ Vector2.new(x, y) }) end)
+                end
+            end
+        end
+
+        if firesignal then
+            pcall(firesignal, obj.InputBegan, inputPayloadBegin, false)
+            pcall(firesignal, obj.TouchTap, { Vector2.new(x, y) })
+            signalFires += 1
+        end
+
+        HookState.SpoofState = Enum.UserInputState.End
+        if getconnections then
+            local okOut, connsOut = pcall(getconnections, obj.InputEnded)
+            if okOut and connsOut then
+                for _, c in ipairs(connsOut) do
+                    connFires += 1
+                    if c.Function then pcall(task.spawn, c.Function, inputPayloadEnd, false) end
+                    pcall(function() c:Fire(inputPayloadEnd, false) end)
+                end
+            end
+        end
+        if firesignal then
+            pcall(firesignal, obj.InputEnded, inputPayloadEnd, false)
+        end
+    end
+
+    -- 3. Also fire UserInputService global InputBegan / TouchTap connections with spoofed RealInputObject
+    if getconnections then
+        HookState.SpoofState = Enum.UserInputState.Begin
+        local okUIS, uisConns = pcall(getconnections, UserInputService.InputBegan)
+        if okUIS and uisConns then
+            for _, c in ipairs(uisConns) do
+                if c.Function and c.Function ~= inputCaptureConn then
+                    connFires += 1
+                    pcall(task.spawn, c.Function, inputPayloadBegin, false)
+                end
+            end
+        end
+    end
+
+    HookState.SpoofActive = false
+
+    Logger:Add("GUI", string.format("%s @(%d,%d) Hit:%d [%s] Sig:%d Conn:%d",
+        labelTag, x, y, #hitObjects, table.concat(topNames, ", "), signalFires, connFires
+    ))
+
+    return signalFires + connFires, #hitObjects
+end
+
+local function DispatchMoveHooks(move, mySide)
+    local fromAlg = IndexToAlgebraic(move.from)
+    local toAlg = IndexToAlgebraic(move.to)
+    local uci = fromAlg .. toAlg
+    local methodsUsed = {}
+
+    -- 1. Locked Remote Hook (if __namecall or GC already captured the Remote)
+    if HookState.CapturedRemote then
+        local rem = HookState.CapturedRemote
+        local ok, err = pcall(function()
+            if rem:IsA("RemoteEvent") then
+                if HookState.CapturedSchema == "ACTION_TWO_STRINGS" then
+                    rem:FireServer(HookState.CapturedActionPrefix or "Move", fromAlg, toAlg, "q")
+                elseif HookState.CapturedSchema == "UCI_STRING" then
+                    rem:FireServer(uci)
+                elseif HookState.CapturedSchema == "TABLE_FROM_TO" then
+                    rem:FireServer({ from = fromAlg, to = toAlg, From = fromAlg, To = toAlg, move = uci, promotion = "q" })
+                elseif HookState.CapturedSchema == "NUMERIC_PAIR" then
+                    rem:FireServer(move.from, move.to)
+                else
+                    rem:FireServer(fromAlg, toAlg, "q")
+                end
+            elseif rem:IsA("RemoteFunction") then
+                task.spawn(function() rem:InvokeServer(fromAlg, toAlg, "q") end)
+            end
+        end)
+        if ok then
+            table.insert(methodsUsed, "Rem:" .. rem.Name)
+        else
+            Logger:Add("ERR", "Remote hook error: " .. tostring(err))
+        end
+    end
+
+    -- 2. Discovered GC Move Functions
+    for _, item in ipairs(HookState.GCMoveFunctions) do
+        pcall(function()
+            if item.selfTable then
+                item.fn(item.selfTable, fromAlg, toAlg, "q")
+            else
+                item.fn(fromAlg, toAlg, "q")
+            end
+            table.insert(methodsUsed, "GC:" .. item.name)
+        end)
+    end
+
+    -- 3. Two-Phase Screen-Coordinate GUI + Real InputObject Hook
+    local boardFrame = GetBoardFrame()
+    if boardFrame then
+        local fx, fy = ComputeSquareScreenCenter(boardFrame, move.from, mySide)
+        local tx, ty = ComputeSquareScreenCenter(boardFrame, move.to, mySide)
+
+        local c1, h1 = FireHooksAtPoint(fx, fy, "SRC:" .. fromAlg)
+        task.wait(Config.SelectionHookDelay)
+        local c2, h2 = FireHooksAtPoint(tx, ty, "DST:" .. toAlg)
+
+        table.insert(methodsUsed, string.format("GUI(H:%d/%d,C:%d)", h1, h2, c1 + c2))
+    else
+        Logger:Add("ERR", "GetBoardFrame() returned nil during move dispatch!")
+    end
+
+    HookState.LastHookSummary = table.concat(methodsUsed, " + ")
 end
 
 --------------------------------------------------------------------------------
--- 9. HUD & MAIN AUTO-PLAY LOOP
+-- 8. HUD & TOGGLEABLE DIAGNOSTIC LOG WINDOW UI
 --------------------------------------------------------------------------------
 local Engine = ChessEngine.new()
 
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "RoChess_PureHook_HUD"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.Parent = (gethui and gethui()) or PlayerGui
+OurScreenGui = Instance.new("ScreenGui")
+OurScreenGui.Name = "RoChess_PureHook_v3_HUD"
+OurScreenGui.ResetOnSpawn = false
+OurScreenGui.Parent = (gethui and gethui()) or PlayerGui
 
+-- Main Control HUD
 local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 305, 0, 148)
-MainFrame.Position = UDim2.new(0.03, 0, 0.52, 0)
-MainFrame.BackgroundColor3 = Color3.fromRGB(16, 18, 24)
+MainFrame.Size = UDim2.new(0, 320, 0, 152)
+MainFrame.Position = UDim2.new(0.03, 0, 0.46, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
 MainFrame.Draggable = true
-MainFrame.Parent = ScreenGui
+MainFrame.Parent = OurScreenGui
 Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
 
-local UIStroke = Instance.new("UIStroke", MainFrame)
-UIStroke.Color = Color3.fromRGB(70, 130, 255)
-UIStroke.Thickness = 1.2
+local MainStroke = Instance.new("UIStroke", MainFrame)
+MainStroke.Color = Color3.fromRGB(65, 135, 255)
+MainStroke.Thickness = 1.3
 
 local TitleLabel = Instance.new("TextLabel")
-TitleLabel.Size = UDim2.new(1, -16, 0, 24)
+TitleLabel.Size = UDim2.new(1, -16, 0, 22)
 TitleLabel.Position = UDim2.new(0, 8, 0, 4)
 TitleLabel.BackgroundTransparency = 1
 TitleLabel.Font = Enum.Font.GothamBold
 TitleLabel.TextSize = 13
-TitleLabel.TextColor3 = Color3.fromRGB(110, 195, 255)
+TitleLabel.TextColor3 = Color3.fromRGB(115, 200, 255)
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
-TitleLabel.Text = "RoChess! Pure Hook AI v2 [ON]"
+TitleLabel.Text = "RoChess! Pure Hook AI v3 [ON]"
 TitleLabel.Parent = MainFrame
 
 local StatusLabel = Instance.new("TextLabel")
-StatusLabel.Size = UDim2.new(1, -16, 0, 84)
-StatusLabel.Position = UDim2.new(0, 8, 0, 28)
+StatusLabel.Size = UDim2.new(1, -16, 0, 86)
+StatusLabel.Position = UDim2.new(0, 8, 0, 26)
 StatusLabel.BackgroundTransparency = 1
 StatusLabel.Font = Enum.Font.Code
 StatusLabel.TextSize = 11
-StatusLabel.TextColor3 = Color3.fromRGB(225, 230, 240)
+StatusLabel.TextColor3 = Color3.fromRGB(225, 232, 245)
 StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 StatusLabel.TextYAlignment = Enum.TextYAlignment.Top
 StatusLabel.TextWrapped = true
-StatusLabel.Text = "Hook: Ready (No Touch/Cursor)\nSynced Moves: 0\nOpponent: Balanced\nBest: --"
+StatusLabel.Text = "Initializing v3 Engine & Logger..."
 StatusLabel.Parent = MainFrame
 
-local ToggleBtn = Instance.new("TextButton")
-ToggleBtn.Size = UDim2.new(0.48, -8, 0, 26)
-ToggleBtn.Position = UDim2.new(0, 8, 1, -32)
-ToggleBtn.BackgroundColor3 = Color3.fromRGB(35, 145, 85)
-ToggleBtn.Font = Enum.Font.GothamBold
-ToggleBtn.TextSize = 12
-ToggleBtn.TextColor3 = Color3.new(1, 1, 1)
-ToggleBtn.Text = "AutoPlay: ON"
-ToggleBtn.Parent = MainFrame
-Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+local BtnAuto = Instance.new("TextButton")
+BtnAuto.Size = UDim2.new(0.32, -6, 0, 26)
+BtnAuto.Position = UDim2.new(0, 8, 1, -32)
+BtnAuto.BackgroundColor3 = Color3.fromRGB(35, 145, 85)
+BtnAuto.Font = Enum.Font.GothamBold
+BtnAuto.TextSize = 11
+BtnAuto.TextColor3 = Color3.new(1, 1, 1)
+BtnAuto.Text = "Auto: ON"
+BtnAuto.Parent = MainFrame
+Instance.new("UICorner", BtnAuto).CornerRadius = UDim.new(0, 5)
 
-ToggleBtn.MouseButton1Click:Connect(function()
+local BtnDepth = Instance.new("TextButton")
+BtnDepth.Size = UDim2.new(0.32, -6, 0, 26)
+BtnDepth.Position = UDim2.new(0.34, 2, 1, -32)
+BtnDepth.BackgroundColor3 = Color3.fromRGB(45, 58, 85)
+BtnDepth.Font = Enum.Font.GothamBold
+BtnDepth.TextSize = 11
+BtnDepth.TextColor3 = Color3.new(1, 1, 1)
+BtnDepth.Text = "Depth: " .. tostring(Config.BaseSearchDepth)
+BtnDepth.Parent = MainFrame
+Instance.new("UICorner", BtnDepth).CornerRadius = UDim.new(0, 5)
+
+local BtnLogToggle = Instance.new("TextButton")
+BtnLogToggle.Size = UDim2.new(0.32, -6, 0, 26)
+BtnLogToggle.Position = UDim2.new(0.68, 0, 1, -32)
+BtnLogToggle.BackgroundColor3 = Color3.fromRGB(180, 115, 30)
+BtnLogToggle.Font = Enum.Font.GothamBold
+BtnLogToggle.TextSize = 11
+BtnLogToggle.TextColor3 = Color3.new(1, 1, 1)
+BtnLogToggle.Text = "Log: ON"
+BtnLogToggle.Parent = MainFrame
+Instance.new("UICorner", BtnLogToggle).CornerRadius = UDim.new(0, 5)
+
+-- Toggleable Live Debug Log Panel
+local LogFrame = Instance.new("Frame")
+LogFrame.Size = UDim2.new(0, 340, 0, 195)
+LogFrame.Position = UDim2.new(0.03, 0, 0.68, 0)
+LogFrame.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
+LogFrame.BorderSizePixel = 0
+LogFrame.Active = true
+LogFrame.Draggable = true
+LogFrame.Visible = Logger.Visible
+LogFrame.Parent = OurScreenGui
+Instance.new("UICorner", LogFrame).CornerRadius = UDim.new(0, 8)
+
+local LogStroke = Instance.new("UIStroke", LogFrame)
+LogStroke.Color = Color3.fromRGB(220, 150, 45)
+LogStroke.Thickness = 1.2
+
+local LogHeader = Instance.new("TextLabel")
+LogHeader.Size = UDim2.new(1, -12, 0, 20)
+LogHeader.Position = UDim2.new(0, 6, 0, 3)
+LogHeader.BackgroundTransparency = 1
+LogHeader.Font = Enum.Font.GothamBold
+LogHeader.TextSize = 11
+LogHeader.TextColor3 = Color3.fromRGB(255, 195, 80)
+LogHeader.TextXAlignment = Enum.TextXAlignment.Left
+LogHeader.Text = "LIVE DEBUG LOG (Move 1 piece manually to sniff Remote)"
+LogHeader.Parent = LogFrame
+
+local LogScroll = Instance.new("ScrollingFrame")
+LogScroll.Size = UDim2.new(1, -12, 1, -54)
+LogScroll.Position = UDim2.new(0, 6, 0, 24)
+LogScroll.BackgroundColor3 = Color3.fromRGB(16, 19, 27)
+LogScroll.BorderSizePixel = 0
+LogScroll.ScrollBarThickness = 5
+LogScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+LogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+LogScroll.Parent = LogFrame
+Instance.new("UICorner", LogScroll).CornerRadius = UDim.new(0, 5)
+
+local LogTextLabel = Instance.new("TextLabel")
+LogTextLabel.Size = UDim2.new(1, -8, 0, 0)
+LogTextLabel.Position = UDim2.new(0, 4, 0, 4)
+LogTextLabel.AutomaticSize = Enum.AutomaticSize.Y
+LogTextLabel.BackgroundTransparency = 1
+LogTextLabel.Font = Enum.Font.Code
+LogTextLabel.TextSize = 10
+LogTextLabel.TextColor3 = Color3.fromRGB(210, 235, 215)
+LogTextLabel.TextXAlignment = Enum.TextXAlignment.Left
+LogTextLabel.TextYAlignment = Enum.TextYAlignment.Top
+LogTextLabel.TextWrapped = true
+LogTextLabel.Text = ""
+LogTextLabel.Parent = LogScroll
+
+Logger.OnUpdate = function()
+    LogTextLabel.Text = Logger:GetText()
+    LogScroll.CanvasPosition = Vector2.new(0, 99999)
+end
+
+local function CreateLogActionBtn(text, posScaleX, color, callback)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0.24, -6, 0, 22)
+    b.Position = UDim2.new(posScaleX, 6, 1, -26)
+    b.BackgroundColor3 = color
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 10
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Text = text
+    b.Parent = LogFrame
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+    b.MouseButton1Click:Connect(callback)
+    return b
+end
+
+CreateLogActionBtn("SCAN GC", 0.00, Color3.fromRGB(50, 95, 165), function()
+    ScanGameForHooks()
+    local bf = GetBoardFrame()
+    if bf then
+        Logger:Add("BOARD", string.format("Board: %s (%dx%d) at (%d,%d)",
+            bf:GetFullName(), bf.AbsoluteSize.X, bf.AbsoluteSize.Y, bf.AbsolutePosition.X, bf.AbsolutePosition.Y
+        ))
+    else
+        Logger:Add("ERR", "BoardFrame NOT found!")
+    end
+end)
+
+CreateLogActionBtn("TEST HOOK", 0.25, Color3.fromRGB(40, 135, 95), function()
+    local bf = GetBoardFrame()
+    local tState = DetectTurnAndMatchState(bf)
+    local mySide = DetectPlayerColor(bf, tState, Engine.Turn)
+    local bestMove, score, meta = Engine:SelectBestMove(mySide)
+    if bestMove then
+        Logger:Add("TEST", string.format("Testing %s (Side:%s, TurnState:%s)", bestMove.uci, mySide == 1 and "W" or "B", tState))
+        task.spawn(function()
+            DispatchMoveHooks(bestMove, mySide)
+        end)
+    else
+        Logger:Add("TEST", "No legal move available to test.")
+    end
+end)
+
+CreateLogActionBtn("COPY LOG", 0.50, Color3.fromRGB(125, 75, 165), function()
+    if setclipboard then
+        setclipboard(Logger:GetText())
+        Logger:Add("SYS", "Copied full log to clipboard!")
+    else
+        Logger:Add("WARN", "setclipboard not supported.")
+    end
+end)
+
+CreateLogActionBtn("CLEAR", 0.75, Color3.fromRGB(140, 50, 50), function()
+    Logger:Clear()
+end)
+
+BtnAuto.MouseButton1Click:Connect(function()
     Config.AutoPlay = not Config.AutoPlay
-    ToggleBtn.Text = Config.AutoPlay and "AutoPlay: ON" or "AutoPlay: OFF"
-    ToggleBtn.BackgroundColor3 = Config.AutoPlay and Color3.fromRGB(35, 145, 85) or Color3.fromRGB(145, 45, 45)
-    TitleLabel.Text = Config.AutoPlay and "RoChess! Pure Hook AI v2 [ON]" or "RoChess! Pure Hook AI v2 [PAUSED]"
+    BtnAuto.Text = Config.AutoPlay and "Auto: ON" or "Auto: OFF"
+    BtnAuto.BackgroundColor3 = Config.AutoPlay and Color3.fromRGB(35, 145, 85) or Color3.fromRGB(145, 45, 45)
+    TitleLabel.Text = Config.AutoPlay and "RoChess! Pure Hook AI v3 [ON]" or "RoChess! Pure Hook AI v3 [PAUSED]"
+    Logger:Add("USER", "AutoPlay set to " .. tostring(Config.AutoPlay))
 end)
 
-local DepthBtn = Instance.new("TextButton")
-DepthBtn.Size = UDim2.new(0.48, -8, 0, 26)
-DepthBtn.Position = UDim2.new(0.52, 0, 1, -32)
-DepthBtn.BackgroundColor3 = Color3.fromRGB(45, 55, 80)
-DepthBtn.Font = Enum.Font.GothamBold
-DepthBtn.TextSize = 12
-DepthBtn.TextColor3 = Color3.new(1, 1, 1)
-DepthBtn.Text = "Depth: " .. tostring(Config.BaseSearchDepth)
-DepthBtn.Parent = MainFrame
-Instance.new("UICorner", DepthBtn).CornerRadius = UDim.new(0, 6)
-
-DepthBtn.MouseButton1Click:Connect(function()
+BtnDepth.MouseButton1Click:Connect(function()
     Config.BaseSearchDepth = (Config.BaseSearchDepth % 5) + 2
-    DepthBtn.Text = "Depth: " .. tostring(Config.BaseSearchDepth)
+    BtnDepth.Text = "Depth: " .. tostring(Config.BaseSearchDepth)
+    Logger:Add("USER", "Search Depth set to " .. tostring(Config.BaseSearchDepth))
 end)
 
+BtnLogToggle.MouseButton1Click:Connect(function()
+    Logger.Visible = not Logger.Visible
+    LogFrame.Visible = Logger.Visible
+    BtnLogToggle.Text = Logger.Visible and "Log: ON" or "Log: OFF"
+    BtnLogToggle.BackgroundColor3 = Logger.Visible and Color3.fromRGB(180, 115, 30) or Color3.fromRGB(70, 75, 90)
+end)
+
+--------------------------------------------------------------------------------
+-- 9. MAIN MATCH SYNC & AUTO-PLAY LOOP
+--------------------------------------------------------------------------------
 local Running = true
-_G.RoChessPureHookCleanup = function()
+_G.RoChessV3Cleanup = function()
     Running = false
-    if ScreenGui and ScreenGui.Parent then
-        ScreenGui:Destroy()
+    if inputCaptureConn then pcall(function() inputCaptureConn:Disconnect() end) end
+    if OurScreenGui and OurScreenGui.Parent then
+        OurScreenGui:Destroy()
     end
 end
 
-local LastSyncedSignature = ""
+task.spawn(ScanGameForHooks)
+
+local LastSyncedSig = "__INIT__"
+local LastTurnState = ""
 local IsExecuting = false
 
 task.spawn(function()
-    while Running and task.wait(0.18) do
+    while Running and task.wait(0.22) do
         local boardFrame = GetBoardFrame()
         if boardFrame and not IsExecuting then
-            local mySide = DetectPlayerColor(boardFrame)
             local sanList = ScrapeMoveListStrictlyBelowBoard(boardFrame)
             local currentSig = table.concat(sanList, " ")
 
-            -- Replay valid move prefix so even a single noisy label never breaks the board state
-            if currentSig ~= LastSyncedSignature then
+            if #sanList == 0 and LastSyncedSig ~= "" then
+                LockedMatchSide = nil
+            end
+
+            if currentSig ~= LastSyncedSig then
                 Engine:Reset()
                 OpponentProfile:Reset()
-                local appliedCount = 0
+                local applied = 0
+                local failedSAN = nil
 
                 for _, san in ipairs(sanList) do
-                    local sideToMove = (appliedCount % 2 == 0) and 1 or -1
+                    local sideToMove = (applied % 2 == 0) and 1 or -1
                     local evalBefore = Engine:Evaluate(1.0)
                     local parsed = Engine:ParseSANMove(san, sideToMove)
                     if parsed then
                         Engine:MakeMove(parsed)
                         table.insert(Engine.MoveHistoryUCI, parsed.uci)
-                        appliedCount += 1
-                        if sideToMove ~= mySide then
-                            local evalAfter = -Engine:Evaluate(1.0)
-                            local isAggro = (parsed.captured ~= 0) or Engine:IsInCheck(mySide)
-                            OpponentProfile:RecordMove(evalBefore - evalAfter, isAggro)
-                        end
+                        applied += 1
+                    else
+                        failedSAN = san
+                        break
                     end
                 end
-                LastSyncedSignature = currentSig
+
+                LastSyncedSig = currentSig
+                Logger:Add("SYNC", string.format("Synced %d/%d moves (%s)%s",
+                    applied, #sanList, currentSig ~= "" and currentSig or "Start",
+                    failedSAN and (" [ERR SAN: " .. failedSAN .. "]") or ""
+                ))
             end
 
-            local badgeState = DetectTurnBadgeState(boardFrame)
-            local isMyTurnByMoves = (Engine.Turn == mySide)
-            local shouldPlay = isMyTurnByMoves and (badgeState ~= "OPPONENT_TURN")
+            local turnState = DetectTurnAndMatchState(boardFrame)
+            local mySide = DetectPlayerColor(boardFrame, turnState, Engine.Turn)
 
-            if Config.AutoPlay and shouldPlay then
+            if turnState ~= LastTurnState then
+                LastTurnState = turnState
+                Logger:Add("STATE", string.format("TurnState=%s | DetectedSide=%s | EngineTurn=%s",
+                    turnState, mySide == 1 and "WHITE" or "BLACK", Engine.Turn == 1 and "WHITE" or "BLACK"
+                ))
+            end
+
+            local isActuallyMyTurn = (turnState == "MY_TURN") or (turnState == "UNKNOWN" and Engine.Turn == mySide and #sanList > 0)
+            local recentHistory = table.concat(sanList, " ", math.max(1, #sanList - 3), #sanList)
+
+            if Config.AutoPlay and isActuallyMyTurn and turnState ~= "INACTIVE_OR_MODAL" then
                 IsExecuting = true
                 local bestMove, score, meta = Engine:SelectBestMove(mySide)
                 if bestMove then
-                    local lastTwoMoves = table.concat(sanList, " ", math.max(1, #sanList - 3), #sanList)
                     StatusLabel.Text = string.format(
-                        "Side: %s | Hook: %s\nHistory (%d): %s\nOpponent: %s\nBest: %s (%+d) [%s | %d nodes]",
+                        "Side: %s | State: %s\nHook: %s\nHistory (%d): %s\nBest: %s (%+d) [%s | %d nodes]",
                         (mySide == 1) and "WHITE" or "BLACK",
-                        HookState.LastHookMethod,
+                        turnState,
+                        HookState.LastHookSummary,
                         #Engine.MoveHistoryUCI,
-                        (lastTwoMoves ~= "" and lastTwoMoves or "Start"),
-                        OpponentProfile.Archetype,
+                        (recentHistory ~= "" and recentHistory or "Start"),
                         bestMove.uci,
                         score,
                         meta,
                         Engine.NodesSearched
                     )
-                    ExecuteMoveViaHook(bestMove, mySide)
+                    Logger:Add("AI", string.format("Playing %s (%+d) [%s]", bestMove.uci, score, meta))
+                    DispatchMoveHooks(bestMove, mySide)
                     task.wait(Config.PostMoveCooldown)
                 end
                 IsExecuting = false
             else
-                local lastTwoMoves = table.concat(sanList, " ", math.max(1, #sanList - 3), #sanList)
                 StatusLabel.Text = string.format(
-                    "Side: %s | Hook: %s\nHistory (%d): %s\nOpponent: %s\nWaiting for opponent move...",
+                    "Side: %s | State: %s\nHook: %s\nHistory (%d): %s\nWaiting for active turn...",
                     (mySide == 1) and "WHITE" or "BLACK",
-                    HookState.LastHookMethod,
+                    turnState,
+                    HookState.LastHookSummary,
                     #Engine.MoveHistoryUCI,
-                    (lastTwoMoves ~= "" and lastTwoMoves or "Start"),
-                    OpponentProfile.Archetype
+                    (recentHistory ~= "" and recentHistory or "Start")
                 )
             end
         end
