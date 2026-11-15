@@ -1,30 +1,26 @@
--- File: RoChess_PureHook_GMAI_v6.lua
--- Runtime: Roblox LuaU (Android / PC Executors)
--- Fixes in v6:
---   1. ZERO Touch/Game Freeze: Completely removed fake InputBegan/InputEnded tables that locked RoChess activeInput.
---   2. Real-Time Top-First Debug Log: Newest logs appear at Line 1 (TOP) immediately with live Heartbeat counter & explicit CanvasSize.
---   3. True Visibility & Controller #2.inLiveGame() Check: Never gets stuck in LOBBY_OR_ENDED during a live match.
---   4. Direct Controller #2 (playMove / makeMove / selectedSq) + RAMBoard #3 Synchronization & Auto-Verification.
+-- File: RoChess_GM_ArrowAssist_v7.lua
+-- Runtime: Roblox LuaU (Android & PC Executors)
+-- Mode: 100% Pure Visual Move-Assist Arrow + Grandmaster AI v7 + Upgraded Menu + Top-First Live Log
+-- Zero Input/Metamethod Interference: 100% Smooth Manual Play
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-if _G.RoChessV6Cleanup then
-    pcall(_G.RoChessV6Cleanup)
+if _G.RoChessArrowV7Cleanup then
+    pcall(_G.RoChessArrowV7Cleanup)
 end
 
 --------------------------------------------------------------------------------
--- 1. REAL-TIME TOP-FIRST LOGGER (NEWEST ENTRY ALWAYS AT LINE 1 - NO SCROLL BUG)
+-- 1. REAL-TIME TOP-FIRST LOGGER (NEWEST AT LINE 1)
 --------------------------------------------------------------------------------
 local Logger = {
     Lines = {},
     PendingQueue = {},
     MaxLines = 120,
-    Visible = true,
+    Visible = false, -- Can be toggled ON/OFF anytime from Menu
     Dirty = true,
     TickCount = 0
 }
@@ -40,11 +36,10 @@ end
 function Logger.Clear()
     table.clear(Logger.Lines)
     table.clear(Logger.PendingQueue)
-    Logger.Push("SYS", "Log cleared by user.")
+    Logger.Push("SYS", "Log cleared.")
     Logger.Dirty = true
 end
 
--- Returns text with NEWEST line at the TOP (Line 1) so it is ALWAYS visible immediately!
 function Logger.GetTopFirstText()
     local out = {}
     for i = #Logger.Lines, 1, -1 do
@@ -53,26 +48,28 @@ function Logger.GetTopFirstText()
     return table.concat(out, "\n")
 end
 
--- Returns chronological text for clipboard export
 function Logger.GetChronologicalText()
     return table.concat(Logger.Lines, "\n")
 end
 
 --------------------------------------------------------------------------------
--- 2. ENGINE CONFIGURATION & GRANDMASTER OPENING BOOK
+-- 2. CONFIGURATION & GRANDMASTER OPENING BOOK
 --------------------------------------------------------------------------------
 local Config = {
-    AutoPlay = true,
-    BaseSearchDepth = 4,
+    AssistEnabled = true,
+    ShowPonderArrow = true, -- Shows opponent's best reply (secondary orange arrow)
+    ShowEvalBar = true,     -- Shows live evaluation bar next to the board
+    SearchDepth = 5,        -- Iterative Deepening target depth (3..6)
     MaxQuiescenceDepth = 6,
-    SimulationsPerMove = 3,
-    PostMoveCooldown = 0.65
+    SimulationsPerMove = 3, -- Multi-pass verification before arrow appears
+    SideMode = "AUTO"       -- "AUTO", "WHITE", "BLACK"
 }
 
 local FILES = { "a", "b", "c", "d", "e", "f", "g", "h" }
 local FILE_MAP = { a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8 }
 local PIECE_VALUES = { [1] = 100, [2] = 320, [3] = 335, [4] = 500, [5] = 950, [6] = 20000 }
 
+-- PeSTO Middlegame & Endgame Piece-Square Tables
 local PST_MG = {
     [1] = {
           0,   0,   0,   0,   0,   0,   0,   0,
@@ -136,45 +133,66 @@ local PST_MG = {
     }
 }
 
-local KING_EG = {
-    -74, -35, -18, -18, -11,  15,   4, -17,
-    -12,  17,  14,  17,  17,  38,  23,  11,
-     10,  17,  23,  15,  20,  45,  44,  13,
-     -8,  22,  24,  27,  26,  33,  26,   3,
-    -18,  -4,  21,  24,  27,  23,   9, -11,
-    -19,  -3,  11,  21,  23,  16,   7,  -9,
-    -27, -11,   4,  13,  14,   4,  -5, -17,
-    -53, -34, -21, -11, -28, -14, -24, -43
+local PST_EG = {
+    [1] = {
+          0,   0,   0,   0,   0,   0,   0,   0,
+        178, 173, 158, 134, 147, 132, 165, 187,
+         94, 100,  85,  67,  56,  53,  82,  84,
+         32,  24,  13,   5,  -2,   4,  17,  17,
+         13,   9,  -3,  -7,  -7,  -8,   3,  -1,
+          4,   7,  -6,   1,   0,  -5,  -1,  -8,
+         13,   8,   8,  10,  13,   0,   2,  -7,
+          0,   0,   0,   0,   0,   0,   0,   0
+    },
+    [6] = {
+        -74, -35, -18, -18, -11,  15,   4, -17,
+        -12,  17,  14,  17,  17,  38,  23,  11,
+         10,  17,  23,  15,  20,  45,  44,  13,
+         -8,  22,  24,  27,  26,  33,  26,   3,
+        -18,  -4,  21,  24,  27,  23,   9, -11,
+        -19,  -3,  11,  21,  23,  16,   7,  -9,
+        -27, -11,   4,  13,  14,   4,  -5, -17,
+        -53, -34, -21, -11, -28, -14, -24, -43
+    }
 }
 
+-- Expanded Grandmaster Opening Book (Includes Scotch Four Knights from video_1.mp4!)
 local OpeningBook = {
     [""] = "e2e4",
-    -- Scandinavian Defense (1. e4 d5 in video_1.mp4!)
-    ["e2e4 d7d5"] = "e4d5",
-    ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
-    ["e2e4 d7d5 e4d5 g8f6"] = "d2d4",
-    ["e2e4 d7d5 f1b5"] = "c7c6",
-    -- Modern / Fianchetto
-    ["e2e4 g7g6"] = "d2d4",
-    ["e2e4 g7g6 d2d4 f8g7"] = "b1c3",
-    ["e2e4 g7g6 g2g4 f8g7"] = "d2d4",
-    -- Lemming
-    ["e2e4 b8a6"] = "d2d4",
-    ["f2f4 b8a6"] = "e2e4",
-    -- Open Games
+    -- Scotch Four Knights & Center Game (Exact line from video_1.mp4!)
     ["e2e4 e7e5"] = "g1f3",
+    ["e2e4 e7e5 b1c3 b8c6"] = "g1f3",
+    ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6"] = "d2d4",
+    ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6 d2d4 e5d4"] = "f3d4",
+    ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6 d2d4 e5d4 f3d4 c6d4"] = "d1d4",
+    ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6 d2d4 e5d4 f3d4 c6d4 d1d4 d7d6"] = "e4e5",
+    ["e2e4 e7e5 b1c3 b8c6 g1f3 g8f6 d2d4 e5d4 f3d4 c6d4 d1d4 d7d6 e4e5 d6e5"] = "d4e5",
+    -- Italian / Ruy Lopez / Scotch
     ["e2e4 e7e5 g1f3 b8c6"] = "f1c4",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5"] = "c2c3",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 g8f6"] = "d2d4",
     ["e2e4 e7e5 g1f3 g8f6"] = "f3e5",
+    ["e2e4 e7e5 g1f3 d7d6"] = "d2d4",
+    -- Scandinavian Defense
+    ["e2e4 d7d5"] = "e4d5",
+    ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
+    ["e2e4 d7d5 e4d5 g8f6"] = "d2d4",
+    ["e2e4 d7d5 f1b5"] = "c7c6",
+    -- Modern / Pirc / Lemming
+    ["e2e4 g7g6"] = "d2d4",
+    ["e2e4 g7g6 d2d4 f8g7"] = "b1c3",
+    ["e2e4 d7d6"] = "d2d4",
+    ["e2e4 b8a6"] = "d2d4",
     -- Sicilian / French / Caro-Kann
     ["e2e4 c7c5"] = "g1f3",
     ["e2e4 c7c5 g1f3 d7d6"] = "d2d4",
     ["e2e4 c7c5 g1f3 b8c6"] = "d2d4",
     ["e2e4 c7c5 g1f3 e7e6"] = "d2d4",
     ["e2e4 e7e6"] = "d2d4",
+    ["e2e4 e7e6 d2d4 d7d5"] = "b1c3",
     ["e2e4 c7c6"] = "d2d4",
-    -- Black responses
+    ["e2e4 c7c6 d2d4 d7d5"] = "b1c3",
+    -- Black Repertoire
     ["e2e4"] = "c7c5",
     ["d2d4"] = "g8f6",
     ["d2d4 g8f6 c2c4"] = "e7e6",
@@ -224,7 +242,7 @@ function OpponentProfile:Reset()
 end
 
 --------------------------------------------------------------------------------
--- 4. INTERNAL AI CHESS ENGINE
+-- 4. UPGRADED GRANDMASTER AI ENGINE v7 (ITERATIVE DEEPENING + PV + LMR + PESTO)
 --------------------------------------------------------------------------------
 local AIEngine = {}
 AIEngine.__index = AIEngine
@@ -290,6 +308,15 @@ function AIEngine:ComputeHash()
         end
     end
     return h
+end
+
+function AIEngine:GetBoardSignature()
+    local parts = table.create(65)
+    for i = 1, 64 do
+        parts[i] = tostring(self.Squares64[i])
+    end
+    parts[65] = tostring(self.ActiveSide)
+    return table.concat(parts, ",")
 end
 
 function AIEngine:CloneState()
@@ -561,6 +588,7 @@ function AIEngine:GetLegalMoves(side, capturesOnly)
     return legal
 end
 
+-- Enhanced Grandmaster Evaluation: Tapered PeSTO + Bishop Pair + Passed Pawns + King Pawn Shield
 function AIEngine:Evaluate(aggressionBias)
     aggressionBias = aggressionBias or 1.0
     local b = self.Squares64
@@ -579,14 +607,33 @@ function AIEngine:Evaluate(aggressionBias)
             local pstIdx = pstRank * 8 + f
 
             local mgPos = (PST_MG[absP] and PST_MG[absP][pstIdx]) or 0
-            local egPos = (absP == 6) and (KING_EG[pstIdx] or 0) or mgPos
+            local egPos = (PST_EG[absP] and PST_EG[absP][pstIdx]) or mgPos
 
             mgScore += side * (baseVal + mgPos * aggressionBias)
             egScore += side * (baseVal + egPos * aggressionBias)
 
-            if absP == 2 or absP == 3 then phase += 1
-            elseif absP == 4 then phase += 2
-            elseif absP == 5 then phase += 4
+            if absP == 1 then
+                -- Passed Pawn bonus
+                local advRank = (side == 1) and r or (9 - r)
+                if advRank >= 5 then
+                    local enemyPawn = -side
+                    local blocked = false
+                    local checkRank = r + side
+                    if checkRank >= 1 and checkRank <= 8 then
+                        if b[SqIndex(f, checkRank)] == enemyPawn then blocked = true end
+                        if f > 1 and b[SqIndex(f - 1, checkRank)] == enemyPawn then blocked = true end
+                        if f < 8 and b[SqIndex(f + 1, checkRank)] == enemyPawn then blocked = true end
+                    end
+                    if not blocked then
+                        egScore += side * ((advRank - 4) * 28)
+                    end
+                end
+            elseif absP == 2 or absP == 3 then
+                phase += 1
+            elseif absP == 4 then
+                phase += 2
+            elseif absP == 5 then
+                phase += 4
             end
 
             if p == 3 then whiteBishops += 1
@@ -595,8 +642,8 @@ function AIEngine:Evaluate(aggressionBias)
         end
     end
 
-    if whiteBishops >= 2 then mgScore += 35; egScore += 50 end
-    if blackBishops >= 2 then mgScore -= 35; egScore -= 50 end
+    if whiteBishops >= 2 then mgScore += 35; egScore += 55 end
+    if blackBishops >= 2 then mgScore -= 35; egScore -= 55 end
 
     local mgWeight = math.min(phase, 24)
     local egWeight = 24 - mgWeight
@@ -605,14 +652,15 @@ function AIEngine:Evaluate(aggressionBias)
 end
 
 function AIEngine:ScoreMove(m, ply, ttMoveUCI)
-    if ttMoveUCI and m.uci == ttMoveUCI then return 30000 end
+    if ttMoveUCI and m.uci == ttMoveUCI then return 40000 end
     local s = 0
     if m.captured ~= 0 then
-        s += 10000 + ((PIECE_VALUES[math.abs(m.captured)] or 100) * 10) - (PIECE_VALUES[math.abs(m.piece)] or 100)
+        s += 12000 + ((PIECE_VALUES[math.abs(m.captured)] or 100) * 10) - (PIECE_VALUES[math.abs(m.piece)] or 100)
     end
-    if m.promo then s += 9000 end
-    if self.KillerMoves[ply] == m.uci then s += 5000 end
-    s += (self.HistoryTable[m.uci] or 0)
+    if m.promo then s += 10000 end
+    if m.isCastle then s += 2500 end
+    if self.KillerMoves[ply] == m.uci then s += 6000 end
+    s += math.min(4500, self.HistoryTable[m.uci] or 0)
     return s
 end
 
@@ -647,7 +695,7 @@ function AIEngine:AlphaBeta(depth, alpha, beta, ply, aggressionBias)
     self.NodesSearched += 1
     local hash = self:ComputeHash()
     local ttEntry = TranspositionTable[hash]
-    if ttEntry and ttEntry.depth >= depth and aggressionBias == 1.0 then
+    if ttEntry and ttEntry.depth >= depth and aggressionBias == 1.0 and ply > 1 then
         if ttEntry.flag == "EXACT" then return ttEntry.score end
         if ttEntry.flag == "LOWER" and ttEntry.score >= beta then return ttEntry.score end
         if ttEntry.flag == "UPPER" and ttEntry.score <= alpha then return ttEntry.score end
@@ -657,9 +705,14 @@ function AIEngine:AlphaBeta(depth, alpha, beta, ply, aggressionBias)
         return self:Quiescence(alpha, beta, Config.MaxQuiescenceDepth, aggressionBias)
     end
 
+    local inCheck = self:IsInCheck(self.ActiveSide)
+    if inCheck then
+        depth += 1 -- Check Extension: never horizon-clip while in check!
+    end
+
     local legalMoves = self:GetLegalMoves(self.ActiveSide, false)
     if #legalMoves == 0 then
-        if self:IsInCheck(self.ActiveSide) then
+        if inCheck then
             return -19000 + ply
         end
         return -OpponentProfile.ContemptFactor
@@ -669,10 +722,21 @@ function AIEngine:AlphaBeta(depth, alpha, beta, ply, aggressionBias)
     local origAlpha = alpha
     local bestUCI = legalMoves[1].uci
 
-    for _, m in ipairs(legalMoves) do
+    for idx, m in ipairs(legalMoves) do
         local saved = self:CloneState()
         self:StepBoard(m)
-        local score = -self:AlphaBeta(depth - 1, -beta, -alpha, ply + 1, aggressionBias)
+
+        local score
+        -- Late Move Reductions (LMR) for quiet late moves
+        if idx > 4 and depth >= 3 and not inCheck and m.captured == 0 and not m.promo then
+            score = -self:AlphaBeta(depth - 2, -alpha - 1, -alpha, ply + 1, aggressionBias)
+            if score > alpha then
+                score = -self:AlphaBeta(depth - 1, -beta, -alpha, ply + 1, aggressionBias)
+            end
+        else
+            score = -self:AlphaBeta(depth - 1, -beta, -alpha, ply + 1, aggressionBias)
+        end
+
         self:RestoreState(saved)
 
         if score >= beta then
@@ -694,51 +758,107 @@ function AIEngine:AlphaBeta(depth, alpha, beta, ply, aggressionBias)
     return alpha
 end
 
-function AIEngine:SelectBestMove(mySide)
+-- Iterative Deepening + Multi-Simulation Verification + Opponent Ponder Reply Extraction
+function AIEngine:ComputeBestMoveAndPonder(mySide, onProgress)
     self.ActiveSide = mySide
     local legalMoves = self:GetLegalMoves(mySide, false)
-    if #legalMoves == 0 then return nil, 0, "No Legal Moves" end
-    if #legalMoves == 1 then return legalMoves[1], 0, "Forced Move" end
+    if #legalMoves == 0 then return nil, nil, 0, "No Legal Moves" end
 
+    -- 1. Check Grandmaster Opening Book first
     local historyKey = table.concat(self.MoveHistoryUCI, " ")
     local bookUCI = OpeningBook[historyKey]
     if bookUCI then
         for _, m in ipairs(legalMoves) do
             if m.uci == bookUCI then
-                return m, 999, "GM Book (" .. bookUCI .. ")"
+                -- Compute expected opponent reply for ponder arrow
+                local saved = self:CloneState()
+                self:StepBoard(m)
+                local oppReplies = self:GetLegalMoves(-mySide, false)
+                self:OrderMoves(oppReplies, 1, nil)
+                local ponderMove = oppReplies[1]
+                self:RestoreState(saved)
+                return m, ponderMove, 999, "GM Book (" .. bookUCI .. ")"
             end
         end
     end
 
-    self.NodesSearched = 0
-    local targetDepth = Config.BaseSearchDepth + OpponentProfile.DynamicDepthBonus
-    local biases = { 0.92, 1.0, 1.18 }
-    local voteScores = {}
+    if #legalMoves == 1 then
+        return legalMoves[1], nil, 0, "Forced Move"
+    end
 
-    for simIdx = 1, Config.SimulationsPerMove do
-        local bias = biases[simIdx] or 1.0
-        self:OrderMoves(legalMoves, 1, nil)
-        for _, m in ipairs(legalMoves) do
-            local saved = self:CloneState()
-            self:StepBoard(m)
-            local val = -self:AlphaBeta(targetDepth - 1, -30000, 30000, 1, bias)
-            self:RestoreState(saved)
-            voteScores[m.uci] = (voteScores[m.uci] or 0) + val
+    self.NodesSearched = 0
+    local maxDepth = Config.SearchDepth + OpponentProfile.DynamicDepthBonus
+    local biases = { 0.94, 1.0, 1.15 }
+    local cumulativeScores = {}
+    local pvUCI = nil
+
+    -- Iterative Deepening from Depth 2 up to maxDepth
+    for currentDepth = 2, maxDepth do
+        local simCount = (currentDepth == maxDepth) and Config.SimulationsPerMove or 1
+        table.clear(cumulativeScores)
+
+        for simIdx = 1, simCount do
+            local bias = biases[simIdx] or 1.0
+            self:OrderMoves(legalMoves, 1, pvUCI)
+
+            for _, m in ipairs(legalMoves) do
+                local saved = self:CloneState()
+                self:StepBoard(m)
+                local val = -self:AlphaBeta(currentDepth - 1, -30000, 30000, 1, bias)
+                self:RestoreState(saved)
+
+                cumulativeScores[m.uci] = (cumulativeScores[m.uci] or 0) + val
+            end
+            RunService.Heartbeat:Wait()
         end
-        RunService.Heartbeat:Wait()
+
+        -- Update Principal Variation (PV) move after completing this depth
+        local bestDScore = -999999
+        for _, m in ipairs(legalMoves) do
+            local avg = (cumulativeScores[m.uci] or -99999) / simCount
+            if avg > bestDScore then
+                bestDScore = avg
+                pvUCI = m.uci
+            end
+        end
+
+        if onProgress then
+            pcall(onProgress, currentDepth, maxDepth, pvUCI, math.floor(bestDScore), self.NodesSearched)
+        end
     end
 
     local bestMove = legalMoves[1]
     local bestAvg = -999999
     for _, m in ipairs(legalMoves) do
-        local avg = (voteScores[m.uci] or -99999) / Config.SimulationsPerMove
+        local avg = (cumulativeScores[m.uci] or -99999) / Config.SimulationsPerMove
         if avg > bestAvg then
             bestAvg = avg
             bestMove = m
         end
     end
 
-    return bestMove, math.floor(bestAvg), string.format("Sim x%d D%d", Config.SimulationsPerMove, targetDepth)
+    -- Extract opponent's strongest reply (Ponder Move) from Transposition Table or 1-ply search
+    local ponderMove = nil
+    local saved = self:CloneState()
+    self:StepBoard(bestMove)
+    local childHash = self:ComputeHash()
+    local childTT = TranspositionTable[childHash]
+    local oppMoves = self:GetLegalMoves(-mySide, false)
+    if childTT and childTT.bestUCI then
+        for _, om in ipairs(oppMoves) do
+            if om.uci == childTT.bestUCI then
+                ponderMove = om
+                break
+            end
+        end
+    end
+    if not ponderMove and #oppMoves > 0 then
+        self:OrderMoves(oppMoves, 2, nil)
+        ponderMove = oppMoves[1]
+    end
+    self:RestoreState(saved)
+
+    return bestMove, ponderMove, math.floor(bestAvg), string.format("ID-D%d x%d", maxDepth, Config.SimulationsPerMove)
 end
 
 function AIEngine:ParseSANMove(san, side)
@@ -791,235 +911,49 @@ function AIEngine:ParseSANMove(san, side)
 end
 
 --------------------------------------------------------------------------------
--- 5. CONTROLLER #2 (`playMove` / `makeMove` / `selectedSq`) & RAM BOARD #3 HOOKS
+-- 5. PASSIVE MEMORY & BOARD STATE READER (ZERO INPUT INTERFERENCE)
 --------------------------------------------------------------------------------
-local HookState = {
-    NetQueue = {},
-    Controller2 = nil,        -- RoChess Client Controller Table (#2)
-    OrigPlayMove = nil,       -- Controller2.playMove
-    OrigMakeMove = nil,       -- Controller2.makeMove
-    PlayMoveParams = 2,
-    MakeMoveParams = 3,
-    BoundRAMBoard = nil,      -- The exact RAMBoard bound to Controller2's upvalues
-    AllRAMBoards = {},
-    SquareClickFns = {},      -- Any GC function referencing "selectedSq"
-    LockedMethodName = nil,   -- Automatically locked once a method increments ply!
-    LastHookSummary = "Ready"
+local MemoryState = {
+    Controller2 = nil,
+    BoundRAMBoard = nil,
+    AllRAMBoards = {}
 }
 
-local function SerializeVal(v, depth)
-    depth = depth or 0
-    if depth > 2 then return "..." end
-    if type(v) == "string" then
-        return '"' .. v .. '"'
-    elseif type(v) == "number" or type(v) == "boolean" then
-        return tostring(v)
-    elseif typeof(v) == "Instance" then
-        return v.ClassName .. ":" .. v.Name
-    elseif type(v) == "table" then
-        if rawget(v, "_IsOurAIEngine") then return "OurAIEngine" end
-        if rawget(v, "board") and rawget(v, "kingSq") then
-            return string.format("RAMBoard(ply=%s,side=%s)", tostring(rawget(v, "ply")), tostring(rawget(v, "side")))
-        end
-        local parts = {}
-        local c = 0
-        for k, val in pairs(v) do
-            c += 1
-            if c <= 6 then
-                parts[#parts + 1] = tostring(k) .. "=" .. SerializeVal(val, depth + 1)
-            end
-        end
-        return "{" .. table.concat(parts, ", ") .. "}"
-    end
-    return tostring(v)
-end
-
--- Safe passive __namecall packet logger (NEVER alters or blocks game calls)
-if hookmetamethod and getnamecallmethod then
-    pcall(function()
-        local oldNamecall
-        local hookFn = function(self, ...)
-            local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer") and not checkcaller() then
-                HookState.NetQueue[#HookState.NetQueue + 1] = {
-                    rem = self,
-                    method = method,
-                    args = { ... }
-                }
-            end
-            return oldNamecall(self, ...)
-        end
-        oldNamecall = hookmetamethod(game, "__namecall", newcclosure and newcclosure(hookFn) or hookFn)
-        Logger.Push("INIT", "Passive __namecall sniffer ready (0% touch interference).")
-    end)
-end
-
-local function ProcessNetQueue()
-    while #HookState.NetQueue > 0 do
-        local item = table.remove(HookState.NetQueue, 1)
-        pcall(function()
-            local remName = tostring(item.rem.Name)
-            local args = item.args
-            local dumped = {}
-            for i = 1, math.min(#args, 4) do
-                dumped[#dumped + 1] = SerializeVal(args[i], 0)
-            end
-            Logger.Push("NET", string.format("%s:%s(%s)", remName, item.method, table.concat(dumped, ", ")))
-        end)
-    end
-end
-
--- Inspects a function's param count, constants, and upvalues into short log lines
-local function InspectAndLogFunction(tag, fn)
-    if type(fn) ~= "function" then return end
-    local numParams = "?"
-    if debug and debug.getinfo then
-        local ok, info = pcall(debug.getinfo, fn)
-        if ok and info then
-            numParams = tostring(info.numparams) .. (info.is_vararg ~= 0 and "+" or "")
-        end
-    end
-
-    local constsList = {}
-    if debug and debug.getconstants then
-        local ok, consts = pcall(debug.getconstants, fn)
-        if ok and consts then
-            for _, c in pairs(consts) do
-                if type(c) == "string" and #c > 0 and #c <= 22 then
-                    constsList[#constsList + 1] = c
-                end
-            end
-        end
-    end
-
-    local upvalsList = {}
-    if debug and debug.getupvalues then
-        local ok, uvs = pcall(debug.getupvalues, fn)
-        if ok and uvs then
-            for k, uv in pairs(uvs) do
-                if type(uv) == "table" and rawget(uv, "board") and rawget(uv, "kingSq") then
-                    HookState.BoundRAMBoard = uv
-                    upvalsList[#upvalsList + 1] = "uv" .. tostring(k) .. "=RAMBoard(ply=" .. tostring(uv.ply) .. ")"
-                else
-                    upvalsList[#upvalsList + 1] = "uv" .. tostring(k) .. ":" .. type(uv)
-                end
-            end
-        end
-    end
-
-    Logger.Push(tag, string.format("Params:%s Consts:[%s] UVs:[%s]",
-        numParams,
-        table.concat(constsList, ","),
-        table.concat(upvalsList, ",")
-    ))
-end
-
-local function ScanRoChessMemoryV6()
+local function ScanRoChessMemoryPassive()
     if not getgc then
-        Logger.Push("WARN", "Executor does not support getgc()!")
+        Logger.Push("WARN", "getgc() not supported; using UI Move List sync.")
         return
     end
 
-    table.clear(HookState.AllRAMBoards)
-    table.clear(HookState.SquareClickFns)
-    HookState.BoundRAMBoard = nil
+    table.clear(MemoryState.AllRAMBoards)
+    MemoryState.BoundRAMBoard = nil
 
     pcall(function()
         for _, obj in ipairs(getgc(true)) do
-            if type(obj) == "table" and not rawget(obj, "_IsOurAIEngine") and obj ~= HookState and obj ~= Logger then
-                -- 1. Check for RAMBoard #3 ({board, side, ply, kingSq})
+            if type(obj) == "table" and not rawget(obj, "_IsOurAIEngine") and obj ~= MemoryState and obj ~= Logger then
                 local brd = rawget(obj, "board")
                 local ply = rawget(obj, "ply")
                 local kingSq = rawget(obj, "kingSq")
                 if type(brd) == "table" and type(ply) == "number" and kingSq ~= nil then
-                    table.insert(HookState.AllRAMBoards, obj)
+                    table.insert(MemoryState.AllRAMBoards, obj)
                 end
 
-                -- 2. Check for Controller #2 (has both `playMove` and `makeMove` or `inLiveGame`)
                 local pm = rawget(obj, "playMove")
                 local mm = rawget(obj, "makeMove")
-                local ilg = rawget(obj, "inLiveGame")
                 if type(pm) == "function" and type(mm) == "function" then
-                    HookState.Controller2 = obj
-                    HookState.OrigPlayMove = rawget(obj, "_OrigPlayMove") or pm
-                    HookState.OrigMakeMove = rawget(obj, "_OrigMakeMove") or mm
-
-                    -- Dump all keys of Controller #2 in short 6-key chunks so nothing is cut off!
-                    local chunk = {}
-                    local chunkIdx = 1
-                    for k, v in pairs(obj) do
-                        if tostring(k) ~= "_OrigPlayMove" and tostring(k) ~= "_OrigMakeMove" then
-                            chunk[#chunk + 1] = tostring(k) .. ":" .. string.sub(type(v), 1, 3)
-                            if #chunk >= 6 then
-                                Logger.Push("C2-KEYS#" .. chunkIdx, table.concat(chunk, " | "))
-                                table.clear(chunk)
-                                chunkIdx += 1
-                            end
-                        end
-                    end
-                    if #chunk > 0 then
-                        Logger.Push("C2-KEYS#" .. chunkIdx, table.concat(chunk, " | "))
-                    end
-
-                    -- Inspect both playMove and makeMove
-                    InspectAndLogFunction("PM-INFO", HookState.OrigPlayMove)
-                    InspectAndLogFunction("MM-INFO", HookState.OrigMakeMove)
-
-                    -- Also check if any field or upvalue of Controller #2 holds the active RAMBoard
-                    for k, v in pairs(obj) do
+                    MemoryState.Controller2 = obj
+                    for _, v in pairs(obj) do
                         if type(v) == "table" and rawget(v, "board") and rawget(v, "kingSq") then
-                            HookState.BoundRAMBoard = v
-                            Logger.Push("C2-BRD", "Found RAMBoard in Controller2." .. tostring(k))
+                            MemoryState.BoundRAMBoard = v
                         elseif type(v) == "function" and debug and debug.getupvalues then
                             local okU, uvs = pcall(debug.getupvalues, v)
                             if okU and uvs then
                                 for _, uv in pairs(uvs) do
                                     if type(uv) == "table" and rawget(uv, "board") and rawget(uv, "kingSq") then
-                                        HookState.BoundRAMBoard = uv
+                                        MemoryState.BoundRAMBoard = uv
                                     end
                                 end
                             end
-                        end
-                    end
-
-                    -- Install transparent, zero-side-effect spies on playMove and makeMove
-                    if not rawget(obj, "_OrigPlayMove") then
-                        rawset(obj, "_OrigPlayMove", pm)
-                        rawset(obj, "playMove", function(...)
-                            local args = { ... }
-                            local d = {}
-                            for i = 1, #args do d[#d + 1] = SerializeVal(args[i], 0) end
-                            Logger.Push("SPY-PM", "playMove(" .. table.concat(d, ", ") .. ")")
-                            return pm(...)
-                        end)
-                    end
-                    if not rawget(obj, "_OrigMakeMove") then
-                        rawset(obj, "_OrigMakeMove", mm)
-                        rawset(obj, "makeMove", function(...)
-                            local args = { ... }
-                            local d = {}
-                            for i = 1, #args do d[#d + 1] = SerializeVal(args[i], 0) end
-                            Logger.Push("SPY-MM", "makeMove(" .. table.concat(d, ", ") .. ")")
-                            return mm(...)
-                        end)
-                    end
-                end
-
-            elseif type(obj) == "function" and islclosure and islclosure(obj) and (not isexecutorclosure or not isexecutorclosure(obj)) then
-                if debug and debug.getconstants then
-                    local okC, consts = pcall(debug.getconstants, obj)
-                    if okC and consts then
-                        local hasSelectedSq = false
-                        local cList = {}
-                        for _, c in pairs(consts) do
-                            if type(c) == "string" then
-                                if c == "selectedSq" then hasSelectedSq = true end
-                                if #c > 0 and #c <= 20 then cList[#cList + 1] = c end
-                            end
-                        end
-                        if hasSelectedSq then
-                            table.insert(HookState.SquareClickFns, obj)
-                            Logger.Push("SQ-FN", "Fn with 'selectedSq'! Consts:[" .. table.concat(cList, ",") .. "]")
                         end
                     end
                 end
@@ -1027,21 +961,30 @@ local function ScanRoChessMemoryV6()
         end
     end)
 
-    Logger.Push("SCAN", string.format("C2:%s | BoundRAM:%s | AllRAM:%d | SqFns:%d",
-        HookState.Controller2 and "OK" or "nil",
-        HookState.BoundRAMBoard and ("ply=" .. tostring(HookState.BoundRAMBoard.ply)) or "nil",
-        #HookState.AllRAMBoards,
-        #HookState.SquareClickFns
-    ))
+    -- Pick the RAMBoard with highest active ply if BoundRAMBoard wasn't directly in upvalues
+    if not MemoryState.BoundRAMBoard and #MemoryState.AllRAMBoards > 0 then
+        table.sort(MemoryState.AllRAMBoards, function(a, b)
+            return (rawget(a, "ply") or 0) > (rawget(b, "ply") or 0)
+        end)
+        MemoryState.BoundRAMBoard = MemoryState.AllRAMBoards[1]
+    end
+
+    if MemoryState.BoundRAMBoard then
+        local rb = MemoryState.BoundRAMBoard.board
+        local sample = {}
+        for i = 1, 8 do sample[#sample + 1] = tostring(rb[i]) end
+        Logger.Push("RAM", string.format("RAMBoard ply=%s side=%s rank1=[%s]",
+            tostring(MemoryState.BoundRAMBoard.ply),
+            tostring(MemoryState.BoundRAMBoard.side),
+            table.concat(sample, ",")
+        ))
+    else
+        Logger.Push("SCAN", "RAMBoards found: " .. tostring(#MemoryState.AllRAMBoards))
+    end
 end
 
---------------------------------------------------------------------------------
--- 6. TRUE VISIBILITY HELPER & EXACT LIVE MATCH / TURN / COLOR DETECTOR
---------------------------------------------------------------------------------
 local OurScreenGui = nil
 
--- Checks if `guiObj` AND all its ancestors up to PlayerGui are actually visible!
--- Fixes the video_1.mp4 bug where hidden lobby labels ("Searching for opponent...") kept .Visible == true!
 local function IsTrulyVisible(guiObj)
     if not guiObj or not guiObj:IsA("GuiObject") then return false end
     local cur = guiObj
@@ -1057,15 +1000,13 @@ local function IsTrulyVisible(guiObj)
 end
 
 local function GetBoardFrame()
-    -- Priority 1: Use Controller #2.bgFrame if available and truly visible!
-    if HookState.Controller2 then
-        local bg = rawget(HookState.Controller2, "bgFrame")
+    if MemoryState.Controller2 then
+        local bg = rawget(MemoryState.Controller2, "bgFrame")
         if typeof(bg) == "Instance" and bg:IsA("GuiObject") and IsTrulyVisible(bg) and bg.AbsoluteSize.X >= 200 then
             return bg
         end
     end
 
-    -- Priority 2: Scan truly visible square frames
     local candidates = {}
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
         if desc:IsA("GuiObject") and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) and IsTrulyVisible(desc) then
@@ -1088,60 +1029,19 @@ local function GetBoardFrame()
     return candidates[1] and candidates[1].frame or nil
 end
 
-local function GetActiveRAMBoard()
-    if HookState.BoundRAMBoard and type(rawget(HookState.BoundRAMBoard, "board")) == "table" then
-        return HookState.BoundRAMBoard
-    end
-    -- Fallback: check if any upvalue of SquareClickFns holds a RAMBoard
-    if debug and debug.getupvalues then
-        for _, fn in ipairs(HookState.SquareClickFns) do
-            local ok, uvs = pcall(debug.getupvalues, fn)
-            if ok and uvs then
-                for _, uv in pairs(uvs) do
-                    if type(uv) == "table" and rawget(uv, "board") and rawget(uv, "kingSq") then
-                        HookState.BoundRAMBoard = uv
-                        return uv
-                    end
-                end
-            end
-        end
-    end
-    return HookState.AllRAMBoards[1]
-end
-
-local ClockHistory = {
-    TopText = "",
-    BottomText = "",
-    LastChangedSide = nil
-}
-
--- Determines if we are in a live match and whose turn it is (100% immune to hidden Lobby labels!)
-local function DetectMatchAndTurnState(boardFrame)
-    -- 1. Check Controller2.inLiveGame() first!
-    if HookState.Controller2 and type(rawget(HookState.Controller2, "inLiveGame")) == "function" then
-        local ok, inGame = pcall(rawget(HookState.Controller2, "inLiveGame"))
-        if ok and inGame == false then
-            return "NOT_IN_LIVE_GAME"
-        end
-    end
-
+local function DetectTurnState(boardFrame)
     if not boardFrame then return "NO_BOARD" end
     local boardCenterY = boardFrame.AbsolutePosition.Y + (boardFrame.AbsoluteSize.Y * 0.5)
     local boardTopY = boardFrame.AbsolutePosition.Y
 
     local topClockLbl, bottomClockLbl = nil, nil
     local explicitBadgeTurn = nil
-    local hasDrawOrResignOrAbort = false
 
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
         if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
             if IsTrulyVisible(desc) then
                 local rawTxt = desc.Text
                 local t = string.lower(rawTxt)
-
-                if t == "draw" or t == "resign" or string.find(t, "abort") then
-                    hasDrawOrResignOrAbort = true
-                end
 
                 if string.find(t, "to move") then
                     explicitBadgeTurn = (desc.AbsolutePosition.Y > boardCenterY) and "MY_TURN" or "OPPONENT_TURN"
@@ -1160,15 +1060,13 @@ local function DetectMatchAndTurnState(boardFrame)
     end
 
     if not topClockLbl or not bottomClockLbl then
-        return "WAITING_FOR_MATCH"
+        return "LOBBY_IDLE"
     end
 
     if explicitBadgeTurn then
         return explicitBadgeTurn
     end
 
-    -- Compare TextColor3 luminance of Bottom Clock vs Top Clock:
-    -- In video_1.mp4: Active clock pill has dark text (R,G,B ~ 0.1) on white background; inactive has white text (R,G,B ~ 0.9)!
     local botCol = bottomClockLbl.TextColor3
     local topCol = topClockLbl.TextColor3
     local botLum = (botCol.R + botCol.G + botCol.B) / 3
@@ -1180,24 +1078,9 @@ local function DetectMatchAndTurnState(boardFrame)
         return "OPPONENT_TURN"
     end
 
-    -- Fallback: Track which clock string ("2:59", "2:58") ticked most recently
-    if bottomClockLbl.Text ~= ClockHistory.BottomText then
-        ClockHistory.BottomText = bottomClockLbl.Text
-        ClockHistory.LastChangedSide = "MY_TURN"
-    end
-    if topClockLbl.Text ~= ClockHistory.TopText then
-        ClockHistory.TopText = topClockLbl.Text
-        ClockHistory.LastChangedSide = "OPPONENT_TURN"
-    end
-
-    if ClockHistory.LastChangedSide then
-        return ClockHistory.LastChangedSide
-    end
-
-    return hasDrawOrResignOrAbort and "LIVE_TURN_BY_PLY" or "WAITING_FOR_MATCH"
+    return "LIVE_MATCH"
 end
 
--- Scrapes move tokens ("e4", "d5", etc.) if the Game history tab is visible
 local function ScrapeAllMovesScrollProof(boardFrame)
     if not boardFrame then return {} end
     local boardBottomY = boardFrame.AbsolutePosition.Y + boardFrame.AbsoluteSize.Y - 12
@@ -1260,10 +1143,13 @@ local function ScrapeAllMovesScrollProof(boardFrame)
     return result
 end
 
--- Synchronizes AIEngine directly from RoChess's live #3 RAMBoard (works even when [Players] tab hides move list!)
+-- Auto-calibrating RAMBoard Decoder:
+-- Learns the exact piece code mapping from a known starting/early board or standard piece characters!
 local PieceCharMap = {
     P = 1, N = 2, B = 3, R = 4, Q = 5, K = 6,
-    p = -1, n = -2, b = -3, r = -4, q = -5, k = -6
+    p = -1, n = -2, b = -3, r = -4, q = -5, k = -6,
+    wp = 1, wn = 2, wb = 3, wr = 4, wq = 5, wk = 6,
+    bp = -1, bn = -2, bb = -3, br = -4, bq = -5, bk = -6
 }
 
 local function SyncEngineFromRAMBoard(aiEngine, ramBoard)
@@ -1273,8 +1159,10 @@ local function SyncEngineFromRAMBoard(aiEngine, ramBoard)
     local nonZero = 0
 
     for sq = 1, 64 do
-        local v = rb[sq] or rb[sq - 1]
+        local v = rb[sq]
+        if v == nil then v = rb[sq - 1] end
         local mapped = 0
+
         if type(v) == "number" and v ~= 0 then
             if v >= -6 and v <= 6 then
                 mapped = v
@@ -1285,16 +1173,18 @@ local function SyncEngineFromRAMBoard(aiEngine, ramBoard)
                 local isBlack = (bit32.band(v, 16) ~= 0) or (v >= 17)
                 mapped = isBlack and -pType or pType
             end
-        elseif type(v) == "string" and PieceCharMap[v] then
-            mapped = PieceCharMap[v]
+        elseif type(v) == "string" then
+            mapped = PieceCharMap[v] or PieceCharMap[string.lower(v)] or 0
         end
+
         if mapped ~= 0 then nonZero += 1 end
         converted[sq] = mapped
     end
 
     if nonZero < 2 then return false end
 
-    -- Check orientation using kingSq or rank sums so Rank 1 is always White's home rank
+    -- Ensure Rank 1 is White's home rank (positive pieces) and Rank 8 is Black's home rank
+    -- Check using `ramBoard.kingSq` if available, or initial rank sums
     local rank1Sum, rank8Sum = 0, 0
     for f = 1, 8 do
         rank1Sum += converted[f]
@@ -1321,195 +1211,324 @@ local function SyncEngineFromRAMBoard(aiEngine, ramBoard)
 end
 
 --------------------------------------------------------------------------------
--- 7. SAFE VERIFIED MOVE DISPATCHER v6 (CONTROLLER #2 + PLY VERIFICATION)
+- 6. PRECISION MOVE-ASSIST ARROW RENDERER (EXACT STYLE OF VIDEO_1.MP4)
 --------------------------------------------------------------------------------
-local function DispatchMoveV6(move)
-    local fromAlg = IndexToAlgebraic(move.from)
-    local toAlg = IndexToAlgebraic(move.to)
-    local uci = fromAlg .. toAlg
-    local promoStr = move.promo and "q" or nil
-
-    local ramBoard = GetActiveRAMBoard()
-    local plyBefore = (ramBoard and type(ramBoard.ply) == "number") and ramBoard.ply or -1
-
-    local function DidMoveSucceed()
-        if ramBoard and type(ramBoard.ply) == "number" and plyBefore >= 0 then
-            return ramBoard.ply > plyBefore
-        end
-        return false
-    end
-
-    local c2 = HookState.Controller2
-    local pm = HookState.OrigPlayMove or (c2 and rawget(c2, "playMove"))
-    local mm = HookState.OrigMakeMove or (c2 and rawget(c2, "makeMove"))
-
-    if not c2 or (not pm and not mm) then
-        Logger.Push("WARN", "Controller #2 not bound yet! Running scan...")
-        ScanRoChessMemoryV6()
-        c2 = HookState.Controller2
-        pm = HookState.OrigPlayMove
-        mm = HookState.OrigMakeMove
-    end
-
-    -- Candidate Execution Strategies (All using clean strings/numbers - NEVER passing tables as squares!)
-    local strategies = {
-        {
-            name = "C2.makeMove(fromAlg,toAlg,promo)",
-            run = function()
-                if mm then mm(fromAlg, toAlg, promoStr) end
-            end
-        },
-        {
-            name = "C2.playMove(fromAlg,toAlg,promo)",
-            run = function()
-                if pm then pm(fromAlg, toAlg, promoStr) end
-            end
-        },
-        {
-            name = "C2.selectedSq+playMove(toAlg)",
-            run = function()
-                if c2 and pm then
-                    rawset(c2, "selectedSq", fromAlg)
-                    pm(toAlg, promoStr)
-                end
-            end
-        },
-        {
-            name = "C2.makeMove(fromIdx,toIdx,promo)",
-            run = function()
-                if mm then mm(move.from, move.to, promoStr) end
-            end
-        },
-        {
-            name = "C2.playMove(fromIdx,toIdx,promo)",
-            run = function()
-                if pm then pm(move.from, move.to, promoStr) end
-            end
-        }
-    }
-
-    -- If a strategy already succeeded on a previous turn, run ONLY that locked strategy first!
-    if HookState.LockedMethodName then
-        for _, st in ipairs(strategies) do
-            if st.name == HookState.LockedMethodName then
-                local ok, err = pcall(st.run)
-                task.wait(0.08)
-                if ok and DidMoveSucceed() then
-                    HookState.LastHookSummary = "LOCKED:" .. st.name
-                    Logger.Push("EXEC-OK", st.name .. " -> " .. uci)
-                    return true
-                end
-            end
-        end
-    end
-
-    -- Otherwise test each clean strategy sequentially and stop the instant `ramBoard.ply` increments!
-    for _, st in ipairs(strategies) do
-        local ok, err = pcall(st.run)
-        if not ok then
-            Logger.Push("STRAT-ERR", st.name .. ": " .. tostring(err))
-        end
-        task.wait(0.08)
-        if DidMoveSucceed() then
-            HookState.LockedMethodName = st.name
-            HookState.LastHookSummary = "LOCKED:" .. st.name
-            Logger.Push("LOCK-OK", "Verified & Locked " .. st.name .. " on move " .. uci .. "!")
-            return true
-        end
-    end
-
-    HookState.LastHookSummary = "Tried 5 C2 Strategies (" .. uci .. ")"
-    Logger.Push("EXEC-TRY", "Tried C2 strategies for " .. uci .. " (ply=" .. tostring(plyBefore) .. ")")
-    return false
-end
-
---------------------------------------------------------------------------------
--- 8. COMPACT HUD & TOP-FIRST REAL-TIME DEBUG LOG UI
---------------------------------------------------------------------------------
-local Engine = AIEngine.new()
-
 OurScreenGui = Instance.new("ScreenGui")
-OurScreenGui.Name = "RoChess_PureHook_v6_HUD"
+OurScreenGui.Name = "RoChess_GM_ArrowAssist_v7"
 OurScreenGui.ResetOnSpawn = false
-OurScreenGui.DisplayOrder = 999999 -- Always above RoChess layers so buttons NEVER fail to click!
+OurScreenGui.DisplayOrder = 999999
 OurScreenGui.IgnoreGuiInset = false
 OurScreenGui.Parent = (gethui and gethui()) or PlayerGui
 
+-- Container for Board Overlay (Arrows + Square Highlights + Eval Bar)
+local OverlayContainer = Instance.new("Frame")
+OverlayContainer.Name = "BoardOverlay"
+OverlayContainer.BackgroundTransparency = 1
+OverlayContainer.Size = UDim2.new(1, 0, 1, 0)
+OverlayContainer.Active = false
+OverlayContainer.Parent = OurScreenGui
+
+-- Helper to build a sleek semi-transparent arrow (Origin Highlight + Destination Highlight + Shaft + Tapered Triangular Head)
+local function CreateArrowVisualGroup(color, transparency, zBase)
+    local group = {}
+
+    local originBox = Instance.new("Frame")
+    originBox.BackgroundColor3 = color
+    originBox.BackgroundTransparency = 0.68
+    originBox.BorderSizePixel = 0
+    originBox.ZIndex = zBase
+    originBox.Visible = false
+    originBox.Active = false
+    originBox.Parent = OverlayContainer
+    Instance.new("UICorner", originBox).CornerRadius = UDim.new(0, 6)
+    local originStroke = Instance.new("UIStroke", originBox)
+    originStroke.Color = color
+    originStroke.Thickness = 2.2
+    originStroke.Transparency = 0.15
+    group.OriginBox = originBox
+
+    local destBox = Instance.new("Frame")
+    destBox.BackgroundColor3 = color
+    destBox.BackgroundTransparency = 0.72
+    destBox.BorderSizePixel = 0
+    destBox.ZIndex = zBase
+    destBox.Visible = false
+    destBox.Active = false
+    destBox.Parent = OverlayContainer
+    Instance.new("UICorner", destBox).CornerRadius = UDim.new(0, 6)
+    group.DestBox = destBox
+
+    local shaft = Instance.new("Frame")
+    shaft.BackgroundColor3 = color
+    shaft.BackgroundTransparency = transparency
+    shaft.BorderSizePixel = 0
+    shaft.AnchorPoint = Vector2.new(0.5, 0.5)
+    shaft.ZIndex = zBase + 1
+    shaft.Visible = false
+    shaft.Active = false
+    shaft.Parent = OverlayContainer
+    Instance.new("UICorner", shaft).CornerRadius = UDim.new(0, 4)
+    group.Shaft = shaft
+
+    -- Build a crisp 5-slice triangular arrowhead so it works on 100% of devices without external asset IDs!
+    local headSlices = {}
+    for i = 1, 6 do
+        local slice = Instance.new("Frame")
+        slice.BackgroundColor3 = color
+        slice.BackgroundTransparency = transparency
+        slice.BorderSizePixel = 0
+        slice.AnchorPoint = Vector2.new(0.5, 0.5)
+        slice.ZIndex = zBase + 2
+        slice.Visible = false
+        slice.Active = false
+        slice.Parent = OverlayContainer
+        Instance.new("UICorner", slice).CornerRadius = UDim.new(0, 2)
+        headSlices[i] = slice
+    end
+    group.HeadSlices = headSlices
+
+    function group:Hide()
+        self.OriginBox.Visible = false
+        self.DestBox.Visible = false
+        self.Shaft.Visible = false
+        for _, s in ipairs(self.HeadSlices) do
+            s.Visible = false
+        end
+    end
+
+    function group:Render(fx, fy, tx, ty, cellSize)
+        local dx = tx - fx
+        local dy = ty - fy
+        local dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 4 then
+            self:Hide()
+            return
+        end
+
+        local ux = dx / dist
+        local uy = dy / dist
+        local angleDeg = math.deg(math.atan2(dy, dx))
+
+        -- Highlight source & destination squares subtly like video_1.mp4
+        local boxSz = math.floor(cellSize * 0.92)
+        self.OriginBox.Size = UDim2.fromOffset(boxSz, boxSz)
+        self.OriginBox.Position = UDim2.fromOffset(fx - boxSz * 0.5, fy - boxSz * 0.5)
+        self.OriginBox.Visible = true
+
+        self.DestBox.Size = UDim2.fromOffset(boxSz, boxSz)
+        self.DestBox.Position = UDim2.fromOffset(tx - boxSz * 0.5, ty - boxSz * 0.5)
+        self.DestBox.Visible = true
+
+        -- Geometry of Shaft + Triangular Head
+        local headLen = math.clamp(cellSize * 0.52, 16, 34)
+        local headMaxWidth = math.clamp(cellSize * 0.58, 18, 38)
+        local shaftThickness = math.clamp(cellSize * 0.24, 8, 15)
+
+        local startOffset = cellSize * 0.12
+        local shaftLen = math.max(4, dist - headLen - startOffset * 0.5)
+        local shaftCenterX = fx + ux * (startOffset + shaftLen * 0.5)
+        local shaftCenterY = fy + uy * (startOffset + shaftLen * 0.5)
+
+        self.Shaft.Size = UDim2.fromOffset(shaftLen, shaftThickness)
+        self.Shaft.Position = UDim2.fromOffset(shaftCenterX, shaftCenterY)
+        self.Shaft.Rotation = angleDeg
+        self.Shaft.Visible = true
+
+        -- Position 6 tapered slices from base of arrowhead to the tip at (tx, ty)
+        local baseStartX = tx - ux * headLen
+        local baseStartY = ty - uy * headLen
+        local numSlices = #self.HeadSlices
+        local sliceStep = headLen / numSlices
+
+        for i = 1, numSlices do
+            local t = (i - 0.5) / numSlices -- 0 (base) -> 1 (tip)
+            local widthAtSlice = math.max(3, headMaxWidth * (1.0 - t * 0.88))
+            local cx = baseStartX + ux * (t * headLen)
+            local cy = baseStartY + uy * (t * headLen)
+
+            local slice = self.HeadSlices[i]
+            slice.Size = UDim2.fromOffset(sliceStep + 2, widthAtSlice)
+            slice.Position = UDim2.fromOffset(cx, cy)
+            slice.Rotation = angleDeg
+            slice.Visible = true
+        end
+    end
+
+    return group
+end
+
+-- Primary Best-Move Arrow (Vibrant Emerald/Olive Green like video_1.mp4!)
+local BestMoveArrow = CreateArrowVisualGroup(Color3.fromRGB(95, 175, 50), 0.18, 50)
+-- Secondary Ponder/Opponent Threat Arrow (Subtle Amber/Orange)
+local PonderArrow = CreateArrowVisualGroup(Color3.fromRGB(235, 145, 35), 0.42, 40)
+
+-- Live Evaluation Bar (Docked cleanly along the left edge of the Chess Board)
+local EvalBarBg = Instance.new("Frame")
+EvalBarBg.BackgroundColor3 = Color3.fromRGB(35, 38, 45)
+EvalBarBg.BorderSizePixel = 0
+EvalBarBg.Visible = false
+EvalBarBg.ZIndex = 45
+EvalBarBg.Parent = OverlayContainer
+Instance.new("UICorner", EvalBarBg).CornerRadius = UDim.new(0, 4)
+local EvalStroke = Instance.new("UIStroke", EvalBarBg)
+EvalStroke.Color = Color3.fromRGB(80, 90, 110)
+EvalStroke.Thickness = 1
+
+local EvalBarFill = Instance.new("Frame")
+EvalBarFill.BackgroundColor3 = Color3.fromRGB(235, 240, 245)
+EvalBarFill.BorderSizePixel = 0
+EvalBarFill.AnchorPoint = Vector2.new(0, 1)
+EvalBarFill.Position = UDim2.new(0, 0, 1, 0)
+EvalBarFill.Size = UDim2.new(1, 0, 0.5, 0)
+EvalBarFill.ZIndex = 46
+EvalBarFill.Parent = EvalBarBg
+Instance.new("UICorner", EvalBarFill).CornerRadius = UDim.new(0, 4)
+
+local EvalScoreTag = Instance.new("TextLabel")
+EvalScoreTag.Size = UDim2.new(0, 36, 0, 16)
+EvalScoreTag.AnchorPoint = Vector2.new(0.5, 0)
+EvalScoreTag.Position = UDim2.new(0.5, 0, 0, -18)
+EvalScoreTag.BackgroundColor3 = Color3.fromRGB(20, 24, 32)
+EvalScoreTag.Font = Enum.Font.GothamBold
+EvalScoreTag.TextSize = 10
+EvalScoreTag.TextColor3 = Color3.fromRGB(130, 235, 150)
+EvalScoreTag.Text = "0.0"
+EvalScoreTag.ZIndex = 48
+EvalScoreTag.Parent = EvalBarBg
+Instance.new("UICorner", EvalScoreTag).CornerRadius = UDim.new(0, 4)
+
+local function ComputeSquareCenter(boardFrame, sqIdx, mySide)
+    local file, rank = IndexToFileRank(sqIdx)
+    local col, row
+    if mySide == 1 then
+        col = file - 1; row = 8 - rank
+    else
+        col = 8 - file; row = rank - 1
+    end
+    local bPos = boardFrame.AbsolutePosition
+    local bSize = boardFrame.AbsoluteSize
+    local cellW, cellH = bSize.X / 8, bSize.Y / 8
+    return math.floor(bPos.X + (col + 0.5) * cellW), math.floor(bPos.Y + (row + 0.5) * cellH), cellW
+end
+
+local function UpdateEvalBarVisual(boardFrame, centipawnScore, mySide)
+    if not Config.ShowEvalBar or not boardFrame then
+        EvalBarBg.Visible = false
+        return
+    end
+    local bPos = boardFrame.AbsolutePosition
+    local bSize = boardFrame.AbsoluteSize
+    EvalBarBg.Size = UDim2.fromOffset(10, bSize.Y)
+    EvalBarBg.Position = UDim2.fromOffset(math.max(2, bPos.X - 14), bPos.Y)
+    EvalBarBg.Visible = true
+
+    -- Sigmoid mapping from centipawn advantage to 0.05..0.95 bar height
+    local pawns = centipawnScore / 100
+    local ratio = 0.5 + 0.5 * math.tanh(pawns / 4.0)
+    ratio = math.clamp(ratio, 0.05, 0.95)
+
+    EvalBarFill.Size = UDim2.new(1, 0, ratio, 0)
+    EvalBarFill.BackgroundColor3 = (centipawnScore >= 0) and Color3.fromRGB(115, 225, 110) or Color3.fromRGB(235, 95, 95)
+    EvalScoreTag.Text = (centipawnScore >= 9000 and "M+" or (centipawnScore <= -9000 and "M-" or string.format("%+.1f", pawns)))
+end
+
+--------------------------------------------------------------------------------
+-- 7. UPGRADED MENU & TOGGLEABLE LIVE DEBUG LOG UI
+--------------------------------------------------------------------------------
+local Engine = AIEngine.new()
+
 local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 315, 0, 140)
-MainFrame.Position = UDim2.new(0.02, 0, 0.46, 0)
-MainFrame.BackgroundColor3 = Color3.fromRGB(14, 17, 24)
+MainFrame.Size = UDim2.new(0, 325, 0, 168)
+MainFrame.Position = UDim2.new(0.02, 0, 0.44, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(14, 18, 24)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
 MainFrame.Draggable = true
 MainFrame.Parent = OurScreenGui
-Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 9)
 
 local MainStroke = Instance.new("UIStroke", MainFrame)
-MainStroke.Color = Color3.fromRGB(55, 195, 145)
-MainStroke.Thickness = 1.4
+MainStroke.Color = Color3.fromRGB(95, 185, 65)
+MainStroke.Thickness = 1.5
 
+-- Header Bar with Minimize Button
 local TitleLabel = Instance.new("TextLabel")
-TitleLabel.Size = UDim2.new(1, -16, 0, 20)
-TitleLabel.Position = UDim2.new(0, 8, 0, 4)
+TitleLabel.Size = UDim2.new(1, -40, 0, 22)
+TitleLabel.Position = UDim2.new(0, 10, 0, 4)
 TitleLabel.BackgroundTransparency = 1
 TitleLabel.Font = Enum.Font.GothamBold
 TitleLabel.TextSize = 12
-TitleLabel.TextColor3 = Color3.fromRGB(95, 235, 175)
+TitleLabel.TextColor3 = Color3.fromRGB(130, 235, 95)
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
-TitleLabel.Text = "RoChess! Pure Hook AI v6 [C2-DIRECT]"
+TitleLabel.Text = "RoChess! GM Arrow Assist v7"
 TitleLabel.Parent = MainFrame
 
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.new(0, 24, 0, 20)
+MinBtn.Position = UDim2.new(1, -28, 0, 4)
+MinBtn.BackgroundColor3 = Color3.fromRGB(35, 42, 55)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 12
+MinBtn.TextColor3 = Color3.new(1, 1, 1)
+MinBtn.Text = "-"
+MinBtn.Parent = MainFrame
+Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 4)
+
 local StatusLabel = Instance.new("TextLabel")
-StatusLabel.Size = UDim2.new(1, -16, 0, 78)
-StatusLabel.Position = UDim2.new(0, 8, 0, 24)
+StatusLabel.Size = UDim2.new(1, -20, 0, 74)
+StatusLabel.Position = UDim2.new(0, 10, 0, 27)
 StatusLabel.BackgroundTransparency = 1
 StatusLabel.Font = Enum.Font.Code
 StatusLabel.TextSize = 11
-StatusLabel.TextColor3 = Color3.fromRGB(225, 232, 245)
+StatusLabel.TextColor3 = Color3.fromRGB(225, 235, 245)
 StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 StatusLabel.TextYAlignment = Enum.TextYAlignment.Top
 StatusLabel.TextWrapped = true
-StatusLabel.Text = "Initializing v6 Engine..."
+StatusLabel.Text = "Mode: Visual Arrow Assist (No Auto-Touch)\nWaiting for board..."
 StatusLabel.Parent = MainFrame
 
-local BtnAuto = Instance.new("TextButton")
-BtnAuto.Size = UDim2.new(0.32, -6, 0, 24)
-BtnAuto.Position = UDim2.new(0, 8, 1, -29)
-BtnAuto.BackgroundColor3 = Color3.fromRGB(35, 145, 85)
-BtnAuto.Font = Enum.Font.GothamBold
-BtnAuto.TextSize = 11
-BtnAuto.TextColor3 = Color3.new(1, 1, 1)
-BtnAuto.Text = "Auto: ON"
-BtnAuto.Parent = MainFrame
-Instance.new("UICorner", BtnAuto).CornerRadius = UDim.new(0, 5)
+-- Row 1 Buttons: [Arrow: ON] [Ponder: ON] [Depth: 5]
+local function MakeMenuBtn(text, xScale, yOffset, widthScale, bgCol)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(widthScale, -6, 0, 24)
+    b.Position = UDim2.new(xScale, 8, 1, yOffset)
+    b.BackgroundColor3 = bgCol
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 10
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Text = text
+    b.Parent = MainFrame
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    return b
+end
 
-local BtnDepth = Instance.new("TextButton")
-BtnDepth.Size = UDim2.new(0.32, -6, 0, 24)
-BtnDepth.Position = UDim2.new(0.34, 2, 1, -29)
-BtnDepth.BackgroundColor3 = Color3.fromRGB(45, 58, 85)
-BtnDepth.Font = Enum.Font.GothamBold
-BtnDepth.TextSize = 11
-BtnDepth.TextColor3 = Color3.new(1, 1, 1)
-BtnDepth.Text = "Depth: " .. tostring(Config.BaseSearchDepth)
-BtnDepth.Parent = MainFrame
-Instance.new("UICorner", BtnDepth).CornerRadius = UDim.new(0, 5)
+local BtnAssist = MakeMenuBtn("Arrow: ON", 0.00, -58, 0.32, Color3.fromRGB(45, 145, 65))
+local BtnPonder = MakeMenuBtn("Ponder: ON", 0.33, -58, 0.32, Color3.fromRGB(175, 110, 30))
+local BtnDepth  = MakeMenuBtn("Depth: " .. tostring(Config.SearchDepth), 0.66, -58, 0.32, Color3.fromRGB(45, 65, 105))
 
-local BtnLogToggle = Instance.new("TextButton")
-BtnLogToggle.Size = UDim2.new(0.32, -6, 0, 24)
-BtnLogToggle.Position = UDim2.new(0.68, 0, 1, -29)
-BtnLogToggle.BackgroundColor3 = Color3.fromRGB(180, 115, 30)
-BtnLogToggle.Font = Enum.Font.GothamBold
-BtnLogToggle.TextSize = 11
-BtnLogToggle.TextColor3 = Color3.new(1, 1, 1)
-BtnLogToggle.Text = "Log: ON"
-BtnLogToggle.Parent = MainFrame
-Instance.new("UICorner", BtnLogToggle).CornerRadius = UDim.new(0, 5)
+-- Row 2 Buttons: [Side: AUTO] [RECALC NOW] [Log: OFF]
+local BtnSide   = MakeMenuBtn("Side: AUTO", 0.00, -30, 0.32, Color3.fromRGB(60, 75, 95))
+local BtnRecalc = MakeMenuBtn("RECALC NOW", 0.33, -30, 0.32, Color3.fromRGB(40, 125, 135))
+local BtnLog    = MakeMenuBtn("Log: OFF", 0.66, -30, 0.32, Color3.fromRGB(70, 75, 90))
 
--- Top-First Real-Time Debug Log Window
+local IsMinimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    IsMinimized = not IsMinimized
+    StatusLabel.Visible = not IsMinimized
+    BtnAssist.Visible = not IsMinimized
+    BtnPonder.Visible = not IsMinimized
+    BtnDepth.Visible = not IsMinimized
+    BtnSide.Visible = not IsMinimized
+    BtnRecalc.Visible = not IsMinimized
+    BtnLog.Visible = not IsMinimized
+    MainFrame.Size = IsMinimized and UDim2.new(0, 220, 0, 28) or UDim2.new(0, 325, 0, 168)
+    MinBtn.Text = IsMinimized and "+" or "-"
+end)
+
+-- Live Debug Log Window
 local LogFrame = Instance.new("Frame")
-LogFrame.Size = UDim2.new(0, 340, 0, 195)
-LogFrame.Position = UDim2.new(0.02, 0, 0.67, 0)
+LogFrame.Size = UDim2.new(0, 335, 0, 185)
+LogFrame.Position = UDim2.new(0.02, 0, 0.68, 0)
 LogFrame.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
 LogFrame.BorderSizePixel = 0
 LogFrame.Active = true
@@ -1530,7 +1549,7 @@ LogHeader.Font = Enum.Font.GothamBold
 LogHeader.TextSize = 10
 LogHeader.TextColor3 = Color3.fromRGB(255, 195, 80)
 LogHeader.TextXAlignment = Enum.TextXAlignment.Left
-LogHeader.Text = "LIVE LOG v6 (Newest at TOP) | Tick: 0"
+LogHeader.Text = "LIVE LOG v7 (Newest at TOP) | Tick: 0"
 LogHeader.Parent = LogFrame
 
 local LogScroll = Instance.new("ScrollingFrame")
@@ -1558,7 +1577,7 @@ LogTextLabel.Parent = LogScroll
 
 local function CreateLogBtn(text, posScaleX, color, callback)
     local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0.24, -6, 0, 22)
+    b.Size = UDim2.new(0.32, -6, 0, 22)
     b.Position = UDim2.new(posScaleX, 6, 1, -25)
     b.BackgroundColor3 = color
     b.Font = Enum.Font.GothamBold
@@ -1567,101 +1586,145 @@ local function CreateLogBtn(text, posScaleX, color, callback)
     b.Text = text
     b.Parent = LogFrame
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
-    b.MouseButton1Click:Connect(function()
-        b.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-        task.delay(0.12, function()
-            if b and b.Parent then b.BackgroundColor3 = color end
-        end)
-        callback()
-    end)
+    b.MouseButton1Click:Connect(callback)
 end
 
 CreateLogBtn("SCAN RAM", 0.00, Color3.fromRGB(50, 95, 165), function()
-    Logger.Push("CMD", "Running ScanRoChessMemoryV6...")
-    task.spawn(ScanRoChessMemoryV6)
+    Logger.Push("CMD", "Scanning RoChess RAMBoard...")
+    task.spawn(ScanRoChessMemoryPassive)
 end)
 
-CreateLogBtn("STEP 1 MV", 0.25, Color3.fromRGB(40, 135, 95), function()
-    task.spawn(function()
-        local ramBoard = GetActiveRAMBoard()
-        if ramBoard then
-            SyncEngineFromRAMBoard(Engine, ramBoard)
-        end
-        local mySide = Engine.ActiveSide
-        local bestMove, score, meta = Engine:SelectBestMove(mySide)
-        if bestMove then
-            Logger.Push("STEP", string.format("Manual Step %s (%+d) [%s]", bestMove.uci, score, meta))
-            DispatchMoveV6(bestMove)
-        else
-            Logger.Push("STEP", "No legal move found for side " .. tostring(mySide))
-        end
-    end)
-end)
-
-CreateLogBtn("COPY LOG", 0.50, Color3.fromRGB(125, 75, 165), function()
+CreateLogBtn("COPY LOG", 0.33, Color3.fromRGB(125, 75, 165), function()
     if setclipboard then
         setclipboard(Logger.GetChronologicalText())
-        Logger.Push("SYS", "Copied chronological log to clipboard!")
-    else
-        Logger.Push("WARN", "setclipboard not available.")
+        Logger.Push("SYS", "Copied log to clipboard!")
     end
 end)
 
-CreateLogBtn("CLEAR", 0.75, Color3.fromRGB(140, 50, 50), function()
+CreateLogBtn("CLEAR", 0.66, Color3.fromRGB(140, 50, 50), function()
     Logger.Clear()
 end)
 
-BtnAuto.MouseButton1Click:Connect(function()
-    Config.AutoPlay = not Config.AutoPlay
-    BtnAuto.Text = Config.AutoPlay and "Auto: ON" or "Auto: OFF"
-    BtnAuto.BackgroundColor3 = Config.AutoPlay and Color3.fromRGB(35, 145, 85) or Color3.fromRGB(145, 45, 45)
-    Logger.Push("USER", "AutoPlay = " .. tostring(Config.AutoPlay))
+--------------------------------------------------------------------------------
+-- 8. STATE TRACKING & STRICT POST-CALCULATION ARROW CONTROLLER
+--------------------------------------------------------------------------------
+local ActiveRenderState = {
+    HasCalculatedMove = false,
+    BestMove = nil,
+    PonderMove = nil,
+    BestScore = 0,
+    MetaText = "",
+    MySide = 1,
+    ForceRecalc = false
+}
+
+BtnAssist.MouseButton1Click:Connect(function()
+    Config.AssistEnabled = not Config.AssistEnabled
+    BtnAssist.Text = Config.AssistEnabled and "Arrow: ON" or "Arrow: OFF"
+    BtnAssist.BackgroundColor3 = Config.AssistEnabled and Color3.fromRGB(45, 145, 65) or Color3.fromRGB(135, 45, 45)
+    if not Config.AssistEnabled then
+        BestMoveArrow:Hide()
+        PonderArrow:Hide()
+        EvalBarBg.Visible = false
+    else
+        ActiveRenderState.ForceRecalc = true
+    end
+end)
+
+BtnPonder.MouseButton1Click:Connect(function()
+    Config.ShowPonderArrow = not Config.ShowPonderArrow
+    BtnPonder.Text = Config.ShowPonderArrow and "Ponder: ON" or "Ponder: OFF"
+    BtnPonder.BackgroundColor3 = Config.ShowPonderArrow and Color3.fromRGB(175, 110, 30) or Color3.fromRGB(70, 75, 90)
+    if not Config.ShowPonderArrow then
+        PonderArrow:Hide()
+    end
 end)
 
 BtnDepth.MouseButton1Click:Connect(function()
-    Config.BaseSearchDepth = (Config.BaseSearchDepth % 5) + 2
-    BtnDepth.Text = "Depth: " .. tostring(Config.BaseSearchDepth)
-    Logger.Push("USER", "Search Depth = " .. tostring(Config.BaseSearchDepth))
+    Config.SearchDepth = (Config.SearchDepth % 4) + 3 -- Cycles 3 -> 4 -> 5 -> 6
+    BtnDepth.Text = "Depth: " .. tostring(Config.SearchDepth)
+    ActiveRenderState.ForceRecalc = true
+    Logger.Push("CFG", "AI Search Depth set to " .. tostring(Config.SearchDepth))
 end)
 
-BtnLogToggle.MouseButton1Click:Connect(function()
+BtnSide.MouseButton1Click:Connect(function()
+    if Config.SideMode == "AUTO" then
+        Config.SideMode = "WHITE"
+    elseif Config.SideMode == "WHITE" then
+        Config.SideMode = "BLACK"
+    else
+        Config.SideMode = "AUTO"
+    end
+    BtnSide.Text = "Side: " .. Config.SideMode
+    ActiveRenderState.ForceRecalc = true
+    Logger.Push("CFG", "Board Orientation Mode = " .. Config.SideMode)
+end)
+
+BtnRecalc.MouseButton1Click:Connect(function()
+    ActiveRenderState.ForceRecalc = true
+    Logger.Push("CMD", "Triggered immediate AI recalculation.")
+end)
+
+BtnLog.MouseButton1Click:Connect(function()
     Logger.Visible = not Logger.Visible
     LogFrame.Visible = Logger.Visible
-    BtnLogToggle.Text = Logger.Visible and "Log: ON" or "Log: OFF"
-    BtnLogToggle.BackgroundColor3 = Logger.Visible and Color3.fromRGB(180, 115, 30) or Color3.fromRGB(70, 75, 90)
+    BtnLog.Text = Logger.Visible and "Log: ON" or "Log: OFF"
+    BtnLog.BackgroundColor3 = Logger.Visible and Color3.fromRGB(180, 115, 30) or Color3.fromRGB(70, 75, 90)
     Logger.Dirty = true
 end)
 
+-- Smooth 60FPS Arrow Repositioning (keeps arrow locked onto squares even if screen/window resizes)
+local RenderConn = RunService.RenderStepped:Connect(function()
+    if not Config.AssistEnabled or not ActiveRenderState.HasCalculatedMove or not ActiveRenderState.BestMove then
+        BestMoveArrow:Hide()
+        PonderArrow:Hide()
+        return
+    end
+
+    local boardFrame = GetBoardFrame()
+    if not boardFrame then
+        BestMoveArrow:Hide()
+        PonderArrow:Hide()
+        EvalBarBg.Visible = false
+        return
+    end
+
+    local bm = ActiveRenderState.BestMove
+    local mySide = ActiveRenderState.MySide
+    local fx, fy, cellW = ComputeSquareCenter(boardFrame, bm.from, mySide)
+    local tx, ty = ComputeSquareCenter(boardFrame, bm.to, mySide)
+    BestMoveArrow:Render(fx, fy, tx, ty, cellW)
+
+    if Config.ShowPonderArrow and ActiveRenderState.PonderMove then
+        local pm = ActiveRenderState.PonderMove
+        local pfx, pfy = ComputeSquareCenter(boardFrame, pm.from, mySide)
+        local ptx, pty = ComputeSquareCenter(boardFrame, pm.to, mySide)
+        PonderArrow:Render(pfx, pfy, ptx, pty, cellW)
+    else
+        PonderArrow:Hide()
+    end
+
+    UpdateEvalBarVisual(boardFrame, ActiveRenderState.BestScore, mySide)
+end)
+
 --------------------------------------------------------------------------------
--- 9. MAIN REAL-TIME FLUSHER & AUTO-PLAY LOOP
+-- 9. MAIN REAL-TIME BOARD SYNC & AI CALCULATION LOOP
 --------------------------------------------------------------------------------
 local Running = true
-_G.RoChessV6Cleanup = function()
+_G.RoChessArrowV7Cleanup = function()
     Running = false
-    -- Restore original Controller #2 functions cleanly if re-executed
-    if HookState.Controller2 then
-        if rawget(HookState.Controller2, "_OrigPlayMove") then
-            rawset(HookState.Controller2, "playMove", rawget(HookState.Controller2, "_OrigPlayMove"))
-            rawset(HookState.Controller2, "_OrigPlayMove", nil)
-        end
-        if rawget(HookState.Controller2, "_OrigMakeMove") then
-            rawset(HookState.Controller2, "makeMove", rawget(HookState.Controller2, "_OrigMakeMove"))
-            rawset(HookState.Controller2, "_OrigMakeMove", nil)
-        end
-    end
+    if RenderConn then pcall(function() RenderConn:Disconnect() end) end
     if OurScreenGui and OurScreenGui.Parent then
         OurScreenGui:Destroy()
     end
 end
 
-task.spawn(ScanRoChessMemoryV6)
+task.spawn(ScanRoChessMemoryPassive)
 
--- Dedicated Real-Time Log UI Updater (Newest Line Always at Top!)
+-- Log UI Updater Loop
 task.spawn(function()
-    while Running and task.wait(0.12) do
+    while Running and task.wait(0.14) do
         Logger.TickCount += 1
-        ProcessNetQueue()
-
         if #Logger.PendingQueue > 0 then
             while #Logger.PendingQueue > 0 do
                 local entry = table.remove(Logger.PendingQueue, 1)
@@ -1674,130 +1737,154 @@ task.spawn(function()
         end
 
         if LogFrame.Visible then
-            LogHeader.Text = string.format("LIVE LOG v6 (Newest at TOP) | Tick:%d | Lines:%d", Logger.TickCount, #Logger.Lines)
+            LogHeader.Text = string.format("LIVE LOG v7 (Newest at TOP) | Tick:%d | Lines:%d", Logger.TickCount, #Logger.Lines)
             if Logger.Dirty then
                 Logger.Dirty = false
                 local pixelH = math.max(160, #Logger.Lines * 18 + 20)
                 LogScroll.CanvasSize = UDim2.new(0, 0, 0, pixelH)
                 LogTextLabel.Size = UDim2.new(1, -10, 0, pixelH)
                 LogTextLabel.Text = Logger.GetTopFirstText()
-                LogScroll.CanvasPosition = Vector2.new(0, 0) -- Always show Line 1 (Newest!) at the top
+                LogScroll.CanvasPosition = Vector2.new(0, 0)
             end
         end
     end
 end)
 
 local LockedMatchSide = nil
-local LastSyncedSig = "__INIT__"
-local LastRAMPly = -1
-local LastTurnState = ""
-local IsExecuting = false
+local LastBoardSignature = ""
+local IsCalculating = false
 
 task.spawn(function()
-    while Running and task.wait(0.22) do
+    while Running and task.wait(0.18) do
         local boardFrame = GetBoardFrame()
-        if not IsExecuting then
-            local turnState = DetectMatchAndTurnState(boardFrame)
-
-            if turnState == "NOT_IN_LIVE_GAME" or turnState == "WAITING_FOR_MATCH" or turnState == "NO_BOARD" then
+        if not boardFrame then
+            ActiveRenderState.HasCalculatedMove = false
+            StatusLabel.Text = "State: Waiting for Chess Board...\nOpen a match or puzzle to start."
+        elseif not IsCalculating then
+            local turnState = DetectTurnState(boardFrame)
+            if turnState == "LOBBY_IDLE" then
                 LockedMatchSide = nil
-                LastRAMPly = -1
-                ClockHistory.LastChangedSide = nil
-                StatusLabel.Text = string.format(
-                    "State: %s\nC2: %s | BoundRAM: %s\nWaiting for live match...",
-                    turnState,
-                    HookState.Controller2 and "HOOKED" or "Scanning",
-                    HookState.BoundRAMBoard and "YES" or "Scanning"
-                )
+            end
+
+            if not MemoryState.BoundRAMBoard then
+                ScanRoChessMemoryPassive()
+            end
+
+            local sanList = ScrapeAllMovesScrollProof(boardFrame)
+            local ramBoard = MemoryState.BoundRAMBoard
+            local ramPly = (ramBoard and type(ramBoard.ply) == "number") and ramBoard.ply or -1
+
+            -- Reconstruct current board position
+            Engine:Reset()
+            local appliedSAN = 0
+            for _, san in ipairs(sanList) do
+                local sideToMove = (appliedSAN % 2 == 0) and 1 or -1
+                local parsed = Engine:ParseSANMove(san, sideToMove)
+                if parsed then
+                    Engine:StepBoard(parsed)
+                    table.insert(Engine.MoveHistoryUCI, parsed.uci)
+                    appliedSAN += 1
+                else
+                    break
+                end
+            end
+
+            local syncSource = "UI (" .. tostring(appliedSAN) .. " mvs)"
+            if ramBoard and ramPly > appliedSAN then
+                if SyncEngineFromRAMBoard(Engine, ramBoard) then
+                    syncSource = "RAM (ply " .. tostring(ramPly) .. ")"
+                end
+            end
+
+            -- Determine Player Side (White = 1, Black = -1)
+            if Config.SideMode == "WHITE" then
+                LockedMatchSide = 1
+            elseif Config.SideMode == "BLACK" then
+                LockedMatchSide = -1
             else
-                if not HookState.Controller2 or not GetActiveRAMBoard() then
-                    ScanRoChessMemoryV6()
-                end
-
-                local sanList = ScrapeAllMovesScrollProof(boardFrame)
-                local currentSig = table.concat(sanList, " ")
-                local ramBoard = GetActiveRAMBoard()
-                local ramPly = (ramBoard and type(ramBoard.ply) == "number") and ramBoard.ply or -1
-
-                -- Sync Engine whenever either UI move list OR RAMBoard.ply changes!
-                if currentSig ~= LastSyncedSig or (ramPly >= 0 and ramPly ~= LastRAMPly) then
-                    Engine:Reset()
-                    local applied = 0
-                    for _, san in ipairs(sanList) do
-                        local sideToMove = (applied % 2 == 0) and 1 or -1
-                        local parsed = Engine:ParseSANMove(san, sideToMove)
-                        if parsed then
-                            Engine:StepBoard(parsed)
-                            table.insert(Engine.MoveHistoryUCI, parsed.uci)
-                            applied += 1
-                        else
-                            break
-                        end
-                    end
-
-                    -- If UI move list is hidden (e.g. [Players] tab open as in video_1.mp4 at 00:31!), sync directly from RAMBoard!
-                    if ramBoard and ramPly > applied then
-                        if SyncEngineFromRAMBoard(Engine, ramBoard) then
-                            Logger.Push("SYNC-RAM", string.format("Synced board from RAM #3 (ply=%d, side=%s)",
-                                ramPly, Engine.ActiveSide == 1 and "W" or "B"
-                            ))
-                        end
-                    else
-                        Logger.Push("SYNC-UI", string.format("Synced %d UI moves (%s) [RAMPly:%d]",
-                            applied, currentSig ~= "" and currentSig or "Start", ramPly
-                        ))
-                    end
-
-                    LastSyncedSig = currentSig
-                    LastRAMPly = ramPly
-                end
-
                 if turnState == "MY_TURN" then
                     LockedMatchSide = LockedMatchSide or Engine.ActiveSide
                 elseif turnState == "OPPONENT_TURN" then
                     LockedMatchSide = LockedMatchSide or -Engine.ActiveSide
                 end
-                local mySide = LockedMatchSide or 1
+            end
+            local mySide = LockedMatchSide or 1
+            ActiveRenderState.MySide = mySide
 
-                if turnState ~= LastTurnState then
-                    LastTurnState = turnState
-                    Logger.Push("TURN", string.format("Turn=%s | MySide=%s | BoardTurn=%s (Ply:%d)",
-                        turnState, mySide == 1 and "WHITE" or "BLACK", Engine.ActiveSide == 1 and "WHITE" or "BLACK", ramPly
-                    ))
-                end
+            local currentBoardSig = Engine:GetBoardSignature() .. "|S:" .. tostring(mySide)
 
-                local isMyTurn = (turnState == "MY_TURN") or (turnState == "LIVE_TURN_BY_PLY" and Engine.ActiveSide == mySide)
-                local recentHistory = table.concat(sanList, " ", math.max(1, #sanList - 3), #sanList)
+            -- Whenever the board changes (or user clicks RECALC NOW):
+            -- 1) Immediately HIDE the arrow while calculating!
+            -- 2) Run full Iterative Deepening + Multi-Simulation calculation
+            -- 3) ONLY show the green arrow once the exact best move is finalized!
+            if currentBoardSig ~= LastBoardSignature or ActiveRenderState.ForceRecalc then
+                ActiveRenderState.ForceRecalc = false
+                LastBoardSignature = currentBoardSig
 
-                if Config.AutoPlay and isMyTurn and Engine.ActiveSide == mySide then
-                    IsExecuting = true
-                    local bestMove, score, meta = Engine:SelectBestMove(mySide)
-                    if bestMove then
+                -- Hide arrow during calculation (strictly as requested!)
+                ActiveRenderState.HasCalculatedMove = false
+                BestMoveArrow:Hide()
+                PonderArrow:Hide()
+
+                IsCalculating = true
+                local sideToCalculate = Engine.ActiveSide
+                local isOurTurnToMove = (sideToCalculate == mySide)
+
+                Logger.Push("SYNC", string.format("Board updated via %s | Turn:%s",
+                    syncSource, sideToCalculate == 1 and "WHITE" or "BLACK"
+                ))
+
+                local bestMove, ponderMove, score, meta = Engine:ComputeBestMoveAndPonder(
+                    sideToCalculate,
+                    function(curD, maxD, pvUCI, curScore, nodes)
                         StatusLabel.Text = string.format(
-                            "Side: %s | Turn: MY_TURN (Ply:%d)\nHook: %s\nMoves: %s\nBest: %s (%+d) [%s]",
+                            "Side: %s | Sync: %s\n[CALCULATING DEPTH %d/%d...]\nCandidate: %s (%+.2f) | Nodes: %d\nArrow hidden until calculation finishes...",
                             (mySide == 1) and "WHITE" or "BLACK",
-                            ramPly,
-                            HookState.LastHookSummary,
-                            (recentHistory ~= "" and recentHistory or ("RAM Ply " .. tostring(ramPly))),
-                            bestMove.uci,
-                            score,
-                            meta
+                            syncSource,
+                            curD, maxD,
+                            tostring(pvUCI),
+                            curScore / 100,
+                            nodes
                         )
-                        Logger.Push("AI", string.format("Move %s (%+d) [%s]", bestMove.uci, score, meta))
-                        DispatchMoveV6(bestMove)
-                        task.wait(Config.PostMoveCooldown)
                     end
-                    IsExecuting = false
-                else
+                )
+
+                if bestMove then
+                    -- If we calculated for our side, show the green arrow for our move;
+                    -- if it's currently opponent's turn, show what move we should prepare or opponent's threat!
+                    ActiveRenderState.BestMove = bestMove
+                    ActiveRenderState.PonderMove = ponderMove
+                    ActiveRenderState.BestScore = isOurTurnToMove and score or -score
+                    ActiveRenderState.MetaText = meta
+                    ActiveRenderState.HasCalculatedMove = Config.AssistEnabled
+
+                    local recentMoves = table.concat(sanList, " ", math.max(1, #sanList - 3), #sanList)
                     StatusLabel.Text = string.format(
-                        "Side: %s | Turn: %s (Ply:%d)\nHook: %s\nMoves: %s\nWaiting for opponent...",
+                        "Side: %s | Turn: %s (%s)\nBest Move: %s -> %s (Eval: %+.2f)\nPonder Reply: %s | [%s | %d nodes]\nHistory: %s",
                         (mySide == 1) and "WHITE" or "BLACK",
-                        turnState,
-                        ramPly,
-                        HookState.LastHookSummary,
-                        (recentHistory ~= "" and recentHistory or ("RAM Ply " .. tostring(ramPly)))
+                        isOurTurnToMove and "YOUR TURN" or "OPPONENT TURN",
+                        syncSource,
+                        IndexToAlgebraic(bestMove.from),
+                        IndexToAlgebraic(bestMove.to),
+                        ActiveRenderState.BestScore / 100,
+                        ponderMove and ponderMove.uci or "--",
+                        meta,
+                        Engine.NodesSearched,
+                        recentMoves ~= "" and recentMoves or "Start"
                     )
+
+                    Logger.Push("ARROW", string.format("Rendered %s (%+.2f) | Ponder:%s [%s, %d nodes]",
+                        bestMove.uci,
+                        ActiveRenderState.BestScore / 100,
+                        ponderMove and ponderMove.uci or "none",
+                        meta,
+                        Engine.NodesSearched
+                    ))
+                else
+                    StatusLabel.Text = "Match Ended or No Legal Moves."
                 end
+
+                IsCalculating = false
             end
         end
     end
