@@ -1,7 +1,7 @@
-File: RoChess_GM_ArrowESP_v9_VIP.lua
--- Architecture: Exact 64-Tile Grid Lock + Triple-Layer Sync (RAM Spy + Auto-Calibrated RAM + Row-Cluster SAN)
--- AI Engine: Grandmaster PVS + Iterative Deepening + Zobrist TT + Null-Move + LMR + Multi-PV + 120-Line GM Book
--- Visuals: Post-Calculation Precision Arrow ESP (Best #1 Green, Alt #2 Cyan, Ponder Orange, Danger Red, Eval Bar)
+-- ============================================================================
+-- RoChess! Grandmaster Arrow ESP v9.1 [VIP EDITION]
+-- Copy to GitHub cleanly (Ensure all old lines in the file are deleted first)
+-- ============================================================================
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -194,17 +194,24 @@ local PST_EG = {
 }
 
 --------------------------------------------------------------------------------
--- 4. GRANDMASTER OPENING BOOK (INCLUDES ZUKERTORT, SCOTCH, CENTER, SICILIAN, ETC.)
+-- 4. GRANDMASTER OPENING BOOK (INCLUDES VAN GEET 1. Nc3 FROM VIDEO_1.MP4!)
 --------------------------------------------------------------------------------
 local OpeningBook = {
     [""] = "e2e4",
-    -- Zukertort Opening (1. Nf3 from video_1.mp4!)
+    -- Van Geet / Dunst Opening (1. Nc3 c5 2. e4 b5 from video_1.mp4 at 00:40-00:48!)
+    ["b1c3"] = "d7d5",
+    ["b1c3 d7d5"] = "e2e4",
+    ["b1c3 d7d5 e2e4"] = "d5d4",
+    ["b1c3 c7c5"] = "g1f3",
+    ["b1c3 c7c5 e2e4"] = "b8c6",
+    ["b1c3 c7c5 e2e4 b7b5"] = "f1b5", -- Punishes 2... b5?? by capturing the free pawn!
+    ["b1c3 e7e5"] = "g1f3",
+    -- Zukertort Opening (1. Nf3)
     ["g1f3"] = "d7d5",
-    ["g1f3 e7e5"] = "f3e5", -- Punishes 1. Nf3 e5?? immediately by winning the free e5 pawn!
-    ["g1f3 e7e5 a2a4"] = "e5e4", -- In video_1.mp4, after 1.Nf3 e5 2.a4, e5-e4 kicks the Knight!
+    ["g1f3 e7e5"] = "f3e5",
+    ["g1f3 e7e5 a2a4"] = "e5e4",
     ["g1f3 e7e5 a2a4 d7d5"] = "f3e5",
     ["g1f3 e7e5 a2a4 d7d5 b1c3"] = "e5e4",
-    ["g1f3 e7e5 a2a4 d7d5 b1c3 f7f6"] = "d2d4",
     ["g1f3 d7d5"] = "d2d4",
     ["g1f3 d7d5 d2d4 g8f6"] = "c2c4",
     ["g1f3 g8f6"] = "c2c4",
@@ -293,7 +300,7 @@ end
 local TranspositionTable = {}
 
 --------------------------------------------------------------------------------
--- 6. GRANDMASTER AI ENGINE v9 (PVS + NULL-MOVE + LMR + MULTI-PV + TAPERED EVAL)
+-- 6. GRANDMASTER AI ENGINE v9.1 (PVS + NULL-MOVE + LMR + MULTI-PV + TAPERED EVAL)
 --------------------------------------------------------------------------------
 local Engine = { _IsOurAI = true }
 
@@ -563,7 +570,6 @@ function Engine:LegalMoves(side, capsOnly)
     return legal
 end
 
--- Grandmaster Tapered Evaluation: Material + MG/EG PeSTO + Passed Pawns + Bishop Pair + Open Files + King Shield
 function Engine:Eval(bias)
     bias = bias or 1.0
     local b = self.B
@@ -576,11 +582,18 @@ function Engine:Eval(bias)
     for sq = 1, 64 do
         local p = b[sq]
         if p == 1 then
-            local f = ((sq - 1) % 8) + 1
-            wPawnsOnFile[f] += 1
+            wPawnsOnFile[((sq - 1) % 8) + 1] += 1
         elseif p == -1 then
-            local f = ((sq - 1) % 8) + 1
-            bPawnsOnFile[f] += 1
+            bPawnsOnFile[((sq - 1) % 8) + 1] += 1
+        end
+    end
+
+    for sq = 1, 64 do
+        local p = b[sq]
+        if p == 1 then
+            wPawnsOnFile[((sq - 1) % 8) + 1] += 1
+        elseif p == -1 then
+            bPawnsOnFile[((sq - 1) % 8) + 1] += 1
         end
     end
 
@@ -601,7 +614,6 @@ function Engine:Eval(bias)
             egScore += side * (val + egP * bias)
 
             if ap == 1 then
-                -- Passed Pawn & Doubled Pawn evaluation
                 local myFilePawns = (side == 1) and wPawnsOnFile[f] or bPawnsOnFile[f]
                 if myFilePawns > 1 then
                     mgScore -= side * 12
@@ -627,7 +639,6 @@ function Engine:Eval(bias)
                 if p == 3 then wBishops += 1 elseif p == -3 then bBishops += 1 end
             elseif ap == 4 then
                 phase += 2
-                -- Rook on open / semi-open file bonus
                 local myP = (side == 1) and wPawnsOnFile[f] or bPawnsOnFile[f]
                 local opP = (side == 1) and bPawnsOnFile[f] or wPawnsOnFile[f]
                 if myP == 0 then
@@ -705,7 +716,6 @@ function Engine:PVSearch(depth, alpha, beta, ply, bias, allowNull)
     if inChk then
         depth += 1
     elseif allowNull and depth >= 3 and ply > 1 then
-        -- Null-Move Pruning (R = 2)
         local savedEP = self.EP
         self.Side = -self.Side
         self.EP = nil
@@ -734,7 +744,6 @@ function Engine:PVSearch(depth, alpha, beta, ply, bias, allowNull)
         if idx == 1 then
             sc = -self:PVSearch(depth - 1, -beta, -alpha, ply + 1, bias, true)
         else
-            -- Late Move Reductions (LMR) + Principal Variation Zero-Window Search
             if idx > 4 and depth >= 3 and not inChk and m.cap == 0 and not m.promo then
                 sc = -self:PVSearch(depth - 2, -alpha - 1, -alpha, ply + 1, bias, true)
             else
@@ -772,19 +781,16 @@ function Engine:PVSearch(depth, alpha, beta, ply, bias, allowNull)
     return alpha
 end
 
--- Returns: bestMove, secondBestMove, ponderMove, bestScore, metaInfo
 function Engine:AnalyzePosition(side, onStep)
     self.Side = side
     local legal = self:LegalMoves(side, false)
     if #legal == 0 then return nil, nil, nil, 0, "No Moves" end
 
-    -- 1. Check Grandmaster Opening Book
     local hKey = table.concat(self.Hist, " ")
     local bookUCI = OpeningBook[hKey]
     if bookUCI then
         for _, m in ipairs(legal) do
             if m.uci == bookUCI then
-                -- Also compute #2 alternative and opponent ponder move
                 local sv = self:Save()
                 self:Step(m)
                 local oppMoves = self:LegalMoves(-side, false)
@@ -831,7 +837,6 @@ function Engine:AnalyzePosition(side, onStep)
         end
     end
 
-    -- Sort all legal moves by final multi-simulation average score to extract Top #1 and Top #2 (Multi-PV)
     table.sort(legal, function(a, b)
         return (scores[a.uci] or -99999) > (scores[b.uci] or -99999)
     end)
@@ -844,7 +849,6 @@ function Engine:AnalyzePosition(side, onStep)
     end
     bestM.evalScore = bestScore
 
-    -- Extract Opponent Ponder Reply from Transposition Table or 1-ply tactical search
     local ponderM = nil
     local sv = self:Save()
     self:Step(bestM)
@@ -890,10 +894,10 @@ function Engine:ParseSAN(san, side)
 end
 
 --------------------------------------------------------------------------------
--- 7. EXACT 8x8 BOARD GEOMETRY LOCK & TRIPLE-LAYER SYNC (FIXES VIDEO_1 BUGS!)
+-- 7. EXACT 8x8 BOARD GEOMETRY LOCK & TRIPLE-LAYER SYNC
 --------------------------------------------------------------------------------
 local GuiRoot = Instance.new("ScreenGui")
-GuiRoot.Name = "RoChess_GM_ArrowESP_v9"
+GuiRoot.Name = "RoChess_GM_ArrowESP_v9_1"
 GuiRoot.ResetOnSpawn = false
 GuiRoot.IgnoreGuiInset = false
 GuiRoot.DisplayOrder = 100
@@ -911,7 +915,6 @@ local function IsVisibleDeep(obj)
     return cur == PlayerGui
 end
 
--- NEVER uses `C2.bgFrame`! Finds the exact 1:1 square 8x8 chess board & computes the exact 64-tile bounding box!
 local CachedBoardInfo = { Frame = nil, X = 0, Y = 0, W = 0, H = 0, LastCheck = 0 }
 
 local function GetExactChessBoardGeometry()
@@ -933,7 +936,6 @@ local function GetExactChessBoardGeometry()
         if d:IsA("GuiObject") and not d:IsDescendantOf(GuiRoot) and IsVisibleDeep(d) then
             local sz = d.AbsoluteSize
             local pos = d.AbsolutePosition
-            -- Must be a 1:1 square (width == height within 10px), >= 210px, and NEVER fullscreen height!
             if sz.X >= 210 and sz.Y >= 210 and math.abs(sz.X - sz.Y) <= 10 and sz.Y <= vp.Y * 0.72 and pos.Y >= 30 then
                 local expectedTileW = sz.X / 8
                 local tileMatches = 0
@@ -955,7 +957,6 @@ local function GetExactChessBoardGeometry()
     end
 
     if bestFrame then
-        -- Check if we can tighten the bounding box to the exact 64 square tiles inside `bestFrame`
         local expectedTileW = bestFrame.AbsoluteSize.X / 8
         local minX, minY, maxX, maxY = 99999, 99999, -99999, -99999
         local tileCount = 0
@@ -991,8 +992,6 @@ local function GetExactChessBoardGeometry()
     return nil
 end
 
--- Detects board orientation (White = 1, Black = -1) directly from the "1".."8" and "a".."h" rank/file labels on the board!
--- Look at video_1.mp4 at 00:31: When playing Black, rank "1" is at the TOP of the board and rank "8" is at the BOTTOM!
 local function DetectBoardOrientationFromLabels(bGeo)
     if not bGeo or not bGeo.Frame then return nil end
     local bx, by, bw, bh = bGeo.X, bGeo.Y, bGeo.W, bGeo.H
@@ -1003,7 +1002,6 @@ local function DetectBoardOrientationFromLabels(bGeo)
         if d:IsA("TextLabel") and not d:IsDescendantOf(GuiRoot) and IsVisibleDeep(d) then
             local pos = d.AbsolutePosition
             local sz = d.AbsoluteSize
-            -- Must be inside or within 28px of the 8x8 board edges and small font label
             if sz.X < 36 and sz.Y < 36 and pos.X >= (bx - 28) and pos.X <= (bx + bw + 28) and pos.Y >= (by - 28) and pos.Y <= (by + bh + 28) then
                 local txt = string.gsub(d.Text, "%s+", "")
                 if txt == "1" then rank1Y = pos.Y
@@ -1024,75 +1022,6 @@ local function DetectBoardOrientationFromLabels(bGeo)
     return nil
 end
 
--- Layer 1: Passive Spy on RoChess #3 RAMBoard (`makeMove`) + Auto-Calibrated Piece Map
-local RAMTracker = {
-    ActiveBoard = nil,
-    AllBoards = {},
-    CodeToPiece = {},
-    Calibrated = false,
-    FlippedRanks = false
-}
-
-local function CalibrateRAMBoardMap(rb)
-    if type(rb) ~= "table" then return end
-    -- Standard starting board at ply == 0:
-    -- Either Rank 1 is at indices 1..8 OR indices 57..64
-    local e1 = rb[5]
-    local e8 = rb[61]
-    if e1 ~= nil and e8 ~= nil and e1 ~= e8 and (rb[17] == 0 or rb[17] == false or rb[17] == "") then
-        -- Check if rb[1..8] are White pieces or Black pieces
-        RAMTracker.CodeToPiece[rb[1]] = 4   -- Rook
-        RAMTracker.CodeToPiece[rb[2]] = 2   -- Knight
-        RAMTracker.CodeToPiece[rb[3]] = 3   -- Bishop
-        RAMTracker.CodeToPiece[rb[4]] = 5   -- Queen
-        RAMTracker.CodeToPiece[rb[5]] = 6   -- King
-        RAMTracker.CodeToPiece[rb[9]] = 1   -- Pawn
-        RAMTracker.CodeToPiece[rb[49]] = -1 -- Black Pawn
-        RAMTracker.CodeToPiece[rb[57]] = -4 -- Black Rook
-        RAMTracker.CodeToPiece[rb[58]] = -2 -- Black Knight
-        RAMTracker.CodeToPiece[rb[59]] = -3 -- Black Bishop
-        RAMTracker.CodeToPiece[rb[60]] = -5 -- Black Queen
-        RAMTracker.CodeToPiece[rb[61]] = -6 -- Black King
-        RAMTracker.Calibrated = true
-        Logger.Log("RAM", "Auto-calibrated RAMBoard piece map from ply=0!")
-    end
-end
-
-local function ScanAndSpyRAMBoards()
-    if not getgc then return end
-    pcall(function()
-        table.clear(RAMTracker.AllBoards)
-        for _, obj in ipairs(getgc(true)) do
-            if type(obj) == "table" and not rawget(obj, "_IsOurAI") then
-                local brd = rawget(obj, "board")
-                local ply = rawget(obj, "ply")
-                local kingSq = rawget(obj, "kingSq")
-                if type(brd) == "table" and type(ply) == "number" and kingSq ~= nil then
-                    table.insert(RAMTracker.AllBoards, obj)
-                    if ply == 0 and not RAMTracker.Calibrated then
-                        CalibrateRAMBoardMap(brd)
-                    end
-                    -- Install passive spy on prototype #3 `makeMove` so we always lock the active match board!
-                    local mt = getmetatable(obj)
-                    local proto = type(mt) == "table" and (rawget(mt, "__index") or mt) or nil
-                    if type(proto) == "table" and type(rawget(proto, "makeMove")) == "function" and not rawget(proto, "_V9Spy") then
-                        rawset(proto, "_V9Spy", true)
-                        local origMM = rawget(proto, "makeMove")
-                        rawset(proto, "makeMove", function(self, ...)
-                            if type(self) == "table" and rawget(self, "board") then
-                                RAMTracker.ActiveBoard = self
-                            end
-                            return origMM(self, ...)
-                        end)
-                        Logger.Log("SPY", "Hooked passive spy onto #3 RAMBoard:makeMove!")
-                    end
-                end
-            end
-        end
-    end)
-end
-
--- Layer 2: Row-Clustering UI Move List Scraper (Below the REAL 8x8 Board Y!)
 local PersistentMovesByPly = {}
 
 local IgnoredWords = {
@@ -1126,12 +1055,10 @@ local function ScrapeMovesBelowRealBoard(bGeo)
         end
     end
 
-    -- Sort top-to-bottom by canvasY
     table.sort(rawElements, function(a, b)
         return a.cy < b.cy
     end)
 
-    -- Cluster elements into horizontal rows whenever their vertical centers are within 13px
     local rows = {}
     for _, el in ipairs(rawElements) do
         local lastRow = rows[#rows]
@@ -1179,7 +1106,6 @@ local function ScrapeMovesBelowRealBoard(bGeo)
 
         if rowMoveNum and #rowSANs >= 1 then
             if rowMoveNum == 1 and #rowSANs == 1 then
-                -- Fresh game on Move 1: clear stale cached moves above ply 2
                 for k in pairs(PersistentMovesByPly) do
                     if k > 2 then PersistentMovesByPly[k] = nil end
                 end
@@ -1197,7 +1123,6 @@ local function ScrapeMovesBelowRealBoard(bGeo)
         end
     end
 
-    -- Fallback if move numbers weren't in the same row cluster
     if maxPly == 0 and #sequentialFallback > 0 then
         for idx, san in ipairs(sequentialFallback) do
             PersistentMovesByPly[idx] = san
@@ -1207,7 +1132,6 @@ local function ScrapeMovesBelowRealBoard(bGeo)
 
     for k in pairs(PersistentMovesByPly) do
         if k > maxPly and maxPly > 0 then
-            -- Keep earlier cached scrolled moves, only trim if a new shorter match reset
             if maxPly <= 2 then
                 PersistentMovesByPly[k] = nil
             else
@@ -1228,7 +1152,6 @@ Overlay.Size = UDim2.new(1, 0, 1, 0)
 Overlay.BackgroundTransparency = 1
 Overlay.Active = false
 
--- Subtle 8x8 Board Calibration Border (Proves 100% pixel lock onto the 8x8 grid!)
 local BoardLockBox = Instance.new("Frame", Overlay)
 BoardLockBox.BackgroundTransparency = 1
 BoardLockBox.BorderSizePixel = 0
@@ -1239,7 +1162,6 @@ BoardLockStroke.Color = Color3.fromRGB(70, 215, 130)
 BoardLockStroke.Thickness = 1.5
 BoardLockStroke.Transparency = 0.45
 
--- King-In-Check / Danger Square Highlight
 local DangerBox = Instance.new("Frame", Overlay)
 DangerBox.BackgroundColor3 = Color3.fromRGB(255, 45, 45)
 DangerBox.BackgroundTransparency = 0.45
@@ -1251,7 +1173,6 @@ local DangerStroke = Instance.new("UIStroke", DangerBox)
 DangerStroke.Color = Color3.fromRGB(255, 80, 80)
 DangerStroke.Thickness = 2.5
 
--- High-Precision Vector Arrow Constructor (Origin Ring + Target Ring + Smooth Shaft + 14-Slice Micro-Tapered Triangular Head + Two Wing Edges + Floating Move/Eval Badge)
 local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
     local arrow = {}
 
@@ -1284,7 +1205,6 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
     arrow.Shaft.Visible = false
     Instance.new("UICorner", arrow.Shaft).CornerRadius = UDim.new(0, 4)
 
-    -- Two Crisp Angled Wing Edges for a Razor-Sharp Arrowhead Outline
     arrow.LeftWing = Instance.new("Frame", Overlay)
     arrow.LeftWing.BackgroundColor3 = mainColor
     arrow.LeftWing.BackgroundTransparency = trans
@@ -1303,7 +1223,6 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
     arrow.RightWing.Visible = false
     Instance.new("UICorner", arrow.RightWing).CornerRadius = UDim.new(1, 0)
 
-    -- 12 Micro-Slices to fill the triangular arrowhead smoothly without staircase steps
     arrow.HeadFill = {}
     for i = 1, 12 do
         local s = Instance.new("Frame", Overlay)
@@ -1316,7 +1235,6 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
         arrow.HeadFill[i] = s
     end
 
-    -- Floating SAN + Eval Tag Pill right near the destination square
     arrow.Badge = Instance.new("TextLabel", Overlay)
     arrow.Badge.Size = UDim2.fromOffset(64, 18)
     arrow.Badge.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -1347,7 +1265,7 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
         if dist < 4 then self:Hide(); return end
 
         local ux, uy = dx / dist, dy / dist
-        local px, py = -uy, ux -- Perpendicular unit vector
+        local px, py = -uy, ux
         local angDeg = math.deg(math.atan2(dy, dx))
 
         local boxSz = math.floor(cellW * 0.88)
@@ -1370,17 +1288,14 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
         self.Shaft.Rotation = angDeg
         self.Shaft.Visible = true
 
-        -- Base of arrowhead
         local baseX = tx - ux * headLen
         local baseY = ty - uy * headLen
 
-        -- Left and Right corners of the triangle base
         local leftCornerX = baseX + px * headHalfW
         local leftCornerY = baseY + py * headHalfW
         local rightCornerX = baseX - px * headHalfW
         local rightCornerY = baseY - py * headHalfW
 
-        -- Position LeftWing (from tip to leftCorner) & RightWing (from tip to rightCorner)
         local wingLen = math.sqrt(headLen * headLen + headHalfW * headHalfW)
         local wingThk = math.max(3, shaftThk * 0.35)
 
@@ -1396,7 +1311,6 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
         self.RightWing.Rotation = math.deg(math.atan2(rdy, rdx))
         self.RightWing.Visible = true
 
-        -- 12 Micro-slices filling the triangle interior
         local nSlices = #self.HeadFill
         local stepLen = headLen / nSlices
         for i = 1, nSlices do
@@ -1423,14 +1337,10 @@ local function CreateVIPArrow(mainColor, badgeBgColor, trans, zBase)
     return arrow
 end
 
--- #1 Primary Best Move Arrow (Stockfish Neon Green)
 local BestArrow = CreateVIPArrow(Color3.fromRGB(95, 205, 40), Color3.fromRGB(18, 38, 18), 0.14, 65)
--- #2 Alternative Move Arrow (Electric Cyan)
 local AltArrow = CreateVIPArrow(Color3.fromRGB(40, 185, 235), Color3.fromRGB(15, 32, 45), 0.35, 55)
--- Opponent Ponder / Threat Arrow (Vibrant Amber-Orange)
 local PonderArrow = CreateVIPArrow(Color3.fromRGB(245, 145, 30), Color3.fromRGB(45, 25, 12), 0.38, 45)
 
--- Docked Evaluation Bar (Matches exact 8x8 board height!)
 local EvalBg = Instance.new("Frame", Overlay)
 EvalBg.BackgroundColor3 = Color3.fromRGB(28, 32, 40)
 EvalBg.BorderSizePixel = 0
@@ -1492,7 +1402,7 @@ Title.Font = Enum.Font.GothamBold
 Title.TextSize = 12
 Title.TextColor3 = Color3.fromRGB(130, 240, 95)
 Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.Text = "RoChess! GM Arrow ESP v9 [VIP EDITION]"
+Title.Text = "RoChess! GM Arrow ESP v9.1 [VIP]"
 
 local MinBtn = Instance.new("TextButton", Menu)
 MinBtn.Size = UDim2.fromOffset(24, 20)
@@ -1565,14 +1475,13 @@ AddMenuBtn("Alt+Ponder: ON", 0.33, -56, Color3.fromRGB(35, 130, 175), function(b
 end)
 
 AddMenuBtn("Depth: " .. Config.SearchDepth, 0.66, -56, Color3.fromRGB(50, 68, 115), function(b)
-    Config.SearchDepth = (Config.SearchDepth % 4) + 3 -- Cycles 3 -> 4 -> 5 -> 6
+    Config.SearchDepth = (Config.SearchDepth % 4) + 3
     b.Text = "Depth: " .. tostring(Config.SearchDepth)
     RenderState.ForceRecalc = true
     Logger.Log("CFG", "AI Search Depth = " .. tostring(Config.SearchDepth))
 end)
 
-local SideBtnRef
-SideBtnRef = AddMenuBtn("Side: AUTO", 0.00, -28, Color3.fromRGB(60, 75, 95), function(b)
+AddMenuBtn("Side: AUTO", 0.00, -28, Color3.fromRGB(60, 75, 95), function(b)
     Config.SideMode = (Config.SideMode == "AUTO" and "WHITE") or (Config.SideMode == "WHITE" and "BLACK") or "AUTO"
     b.Text = "Side: " .. Config.SideMode
     RenderState.ForceRecalc = true
@@ -1586,7 +1495,6 @@ AddMenuBtn("RESET / CALC", 0.33, -28, Color3.fromRGB(40, 130, 135), function()
     Logger.Log("CMD", "Cleared cache & forced recalculation.")
 end)
 
--- Live Log Panel
 local LogBox = Instance.new("Frame", GuiRoot)
 LogBox.Size = UDim2.new(0, 330, 0, 155)
 LogBox.Position = UDim2.new(0.03, 0, 0.68, 0)
@@ -1672,12 +1580,10 @@ local RenderConn = RunService.RenderStepped:Connect(function()
         return
     end
 
-    -- Draw sleek calibration frame around the exact 8x8 board
     BoardLockBox.Size = UDim2.fromOffset(bGeo.W, bGeo.H)
     BoardLockBox.Position = UDim2.fromOffset(bGeo.X, bGeo.Y)
     BoardLockBox.Visible = true
 
-    -- Highlight King in red if in check
     if RenderState.InCheckSq then
         local kx, ky, cw = ComputeExactSqCenter(bGeo, RenderState.InCheckSq, RenderState.Side)
         local bSz = math.floor(cw * 0.92)
@@ -1688,7 +1594,6 @@ local RenderConn = RunService.RenderStepped:Connect(function()
         DangerBox.Visible = false
     end
 
-    -- Strictly hide arrows while AI is still calculating!
     if not RenderState.Ready or not RenderState.Best then
         BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
         return
@@ -1696,14 +1601,12 @@ local RenderConn = RunService.RenderStepped:Connect(function()
 
     local mySide = RenderState.Side
 
-    -- 1. Render #1 Best Move Arrow (Green)
     local bm = RenderState.Best
     local fx, fy, cw = ComputeExactSqCenter(bGeo, bm.from, mySide)
     local tx, ty = ComputeExactSqCenter(bGeo, bm.to, mySide)
     local bestTag = string.format("%s (%+.1f)", bm.san or bm.uci, RenderState.Score / 100)
     BestArrow:Draw(fx, fy, tx, ty, cw, bestTag)
 
-    -- 2. Render #2 Alternative Move Arrow (Cyan)
     if Config.ShowAltArrow and RenderState.Alt then
         local am = RenderState.Alt
         local afx, afy = ComputeExactSqCenter(bGeo, am.from, mySide)
@@ -1714,7 +1617,6 @@ local RenderConn = RunService.RenderStepped:Connect(function()
         AltArrow:Hide()
     end
 
-    -- 3. Render Opponent Ponder / Threat Arrow (Orange)
     if Config.ShowPonderArrow and RenderState.Ponder then
         local pm = RenderState.Ponder
         local pfx, pfy = ComputeExactSqCenter(bGeo, pm.from, mySide)
@@ -1725,7 +1627,6 @@ local RenderConn = RunService.RenderStepped:Connect(function()
         PonderArrow:Hide()
     end
 
-    -- 4. Update Docked Evaluation Bar (Exact height of the 8x8 board!)
     if Config.ShowEvalBar then
         EvalBg.Size = UDim2.fromOffset(8, bGeo.H)
         EvalBg.Position = UDim2.fromOffset(math.max(2, bGeo.X - 12), bGeo.Y)
@@ -1734,7 +1635,7 @@ local RenderConn = RunService.RenderStepped:Connect(function()
         local ratio = math.clamp(0.5 + 0.5 * math.tanh(pawns / 4.0), 0.05, 0.95)
         EvalFill.Size = UDim2.new(1, 0, ratio, 0)
         EvalFill.BackgroundColor3 = (pawns >= 0) and Color3.fromRGB(105, 225, 95) or Color3.fromRGB(235, 85, 85)
-        EvalText.Text = ( math.abs(RenderState.Score) >= 9000 ) and (RenderState.Score > 0 and "M+" or "M-") or string.format("%+.1f", pawns)
+        EvalText.Text = (math.abs(RenderState.Score) >= 9000) and (RenderState.Score > 0 and "M+" or "M-") or string.format("%+.1f", pawns)
     else
         EvalBg.Visible = false
     end
@@ -1747,8 +1648,7 @@ _G.RoChessV9Cleanup = function()
     if GuiRoot and GuiRoot.Parent then GuiRoot:Destroy() end
 end
 
-Logger.Log("INIT", "v9 VIP Loaded. Locking onto exact 8x8 board...")
-task.spawn(ScanAndSpyRAMBoards)
+Logger.Log("INIT", "v9.1 VIP Loaded. Locking onto exact 8x8 board...")
 
 local LastBoardSig = ""
 local Busy = false
@@ -1757,7 +1657,6 @@ task.spawn(function()
     while Running and task.wait(0.18) do
         local bGeo = GetExactChessBoardGeometry()
         if bGeo and not Busy then
-            -- 1. Detect Board Orientation from physical rank/file labels ("1".."8", "a".."h")
             local autoSide = DetectBoardOrientationFromLabels(bGeo)
             local mySide = 1
             if Config.SideMode == "WHITE" then
@@ -1769,7 +1668,6 @@ task.spawn(function()
             end
             RenderState.Side = mySide
 
-            -- 2. Scrape Move History below the REAL 8x8 board Y!
             local maxPly = ScrapeMovesBelowRealBoard(bGeo)
             Engine:Reset()
             local applied = 0
@@ -1788,7 +1686,6 @@ task.spawn(function()
                 end
             end
 
-            -- Check if either King is currently in check
             if Engine:InCheck(Engine.Side) then
                 RenderState.InCheckSq = Engine:FindKing(Engine.Side)
             else
@@ -1800,7 +1697,6 @@ task.spawn(function()
                 RenderState.ForceRecalc = false
                 LastBoardSig = sig
 
-                -- Immediately hide arrows while AI runs multi-depth simulations
                 RenderState.Ready = false
                 BestArrow:Hide(); AltArrow:Hide(); PonderArrow:Hide()
 
@@ -1810,7 +1706,7 @@ task.spawn(function()
 
                 local bestM, altM, ponderM, sc, meta = Engine:AnalyzePosition(calcSide, function(d, maxD, pv, curSc, nodes)
                     Status.Text = string.format(
-                        "Board: %dx%d | Side: %s | Ply: %d\n⚡ Analyzing Depth %d/%d...\nPV: %s (%+.2f) | %d nodes\n(Arrows appear once calculation locks)",
+                        "Board: %dx%d | Side: %s | Ply: %d\nAnalyzing Depth %d/%d...\nPV: %s (%+.2f) | %d nodes\n(Arrows appear once calculation locks)",
                         math.floor(bGeo.W), math.floor(bGeo.H),
                         mySide == 1 and "WHITE" or "BLACK",
                         applied, d, maxD, tostring(pv), curSc / 100, nodes
