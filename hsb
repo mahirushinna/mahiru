@@ -1,33 +1,32 @@
--- File: RoChess_PureHook_GMAI_v5.lua
+-- File: RoChess_PureHook_GMAI_v6.lua
 -- Runtime: Roblox LuaU (Android / PC Executors)
--- Fixes:
---   1. Exact Turn Detection via Clock TextColor3 (Black-on-White active pill) + RAM Board.side/ply
---   2. Direct Memory Sync from RoChess #3 Board Instance ({board, side, ply, ep, castling}) + Scroll-proof Move List
---   3. Direct Invocation & Spy Hook on #2 makeMove (Proto:false) + "xb3"/"b1" Packet Sender Discovery
---   4. Full-Board Hitbox InputBegan -> InputChanged -> InputEnded Hook (Fixes SqHook 0->0 without touching Modals/Overlay)
+-- Fixes in v6:
+--   1. ZERO Touch/Game Freeze: Completely removed fake InputBegan/InputEnded tables that locked RoChess activeInput.
+--   2. Real-Time Top-First Debug Log: Newest logs appear at Line 1 (TOP) immediately with live Heartbeat counter & explicit CanvasSize.
+--   3. True Visibility & Controller #2.inLiveGame() Check: Never gets stuck in LOBBY_OR_ENDED during a live match.
+--   4. Direct Controller #2 (playMove / makeMove / selectedSq) + RAMBoard #3 Synchronization & Auto-Verification.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local GuiService = game:GetService("GuiService")
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-if _G.RoChessV5Cleanup then
-    pcall(_G.RoChessV5Cleanup)
+if _G.RoChessV6Cleanup then
+    pcall(_G.RoChessV6Cleanup)
 end
 
 --------------------------------------------------------------------------------
--- 1. THREAD-SAFE ASYNC LOGGER (AUTO-SCROLLS EVEN AFTER TOGGLING LOG: ON)
+-- 1. REAL-TIME TOP-FIRST LOGGER (NEWEST ENTRY ALWAYS AT LINE 1 - NO SCROLL BUG)
 --------------------------------------------------------------------------------
 local Logger = {
     Lines = {},
     PendingQueue = {},
-    MaxLines = 180,
+    MaxLines = 120,
     Visible = true,
-    Dirty = false
+    Dirty = true,
+    TickCount = 0
 }
 
 function Logger.Push(category, msg)
@@ -41,10 +40,21 @@ end
 function Logger.Clear()
     table.clear(Logger.Lines)
     table.clear(Logger.PendingQueue)
+    Logger.Push("SYS", "Log cleared by user.")
     Logger.Dirty = true
 end
 
-function Logger.GetText()
+-- Returns text with NEWEST line at the TOP (Line 1) so it is ALWAYS visible immediately!
+function Logger.GetTopFirstText()
+    local out = {}
+    for i = #Logger.Lines, 1, -1 do
+        out[#out + 1] = Logger.Lines[i]
+    end
+    return table.concat(out, "\n")
+end
+
+-- Returns chronological text for clipboard export
+function Logger.GetChronologicalText()
     return table.concat(Logger.Lines, "\n")
 end
 
@@ -56,7 +66,6 @@ local Config = {
     BaseSearchDepth = 4,
     MaxQuiescenceDepth = 6,
     SimulationsPerMove = 3,
-    SelectionHookDelay = 0.09,
     PostMoveCooldown = 0.65
 }
 
@@ -140,26 +149,32 @@ local KING_EG = {
 
 local OpeningBook = {
     [""] = "e2e4",
-    ["e2e4 d7d5 f1b5"] = "c7c6",
+    -- Scandinavian Defense (1. e4 d5 in video_1.mp4!)
     ["e2e4 d7d5"] = "e4d5",
     ["e2e4 d7d5 e4d5 d8d5"] = "b1c3",
+    ["e2e4 d7d5 e4d5 g8f6"] = "d2d4",
+    ["e2e4 d7d5 f1b5"] = "c7c6",
+    -- Modern / Fianchetto
     ["e2e4 g7g6"] = "d2d4",
     ["e2e4 g7g6 d2d4 f8g7"] = "b1c3",
     ["e2e4 g7g6 g2g4 f8g7"] = "d2d4",
+    -- Lemming
     ["e2e4 b8a6"] = "d2d4",
     ["f2f4 b8a6"] = "e2e4",
-    ["f2f4 b8a6 e2e4 e7e5"] = "g1f3",
+    -- Open Games
     ["e2e4 e7e5"] = "g1f3",
     ["e2e4 e7e5 g1f3 b8c6"] = "f1c4",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 f8c5"] = "c2c3",
     ["e2e4 e7e5 g1f3 b8c6 f1c4 g8f6"] = "d2d4",
     ["e2e4 e7e5 g1f3 g8f6"] = "f3e5",
+    -- Sicilian / French / Caro-Kann
     ["e2e4 c7c5"] = "g1f3",
     ["e2e4 c7c5 g1f3 d7d6"] = "d2d4",
     ["e2e4 c7c5 g1f3 b8c6"] = "d2d4",
     ["e2e4 c7c5 g1f3 e7e6"] = "d2d4",
     ["e2e4 e7e6"] = "d2d4",
     ["e2e4 c7c6"] = "d2d4",
+    -- Black responses
     ["e2e4"] = "c7c5",
     ["d2d4"] = "g8f6",
     ["d2d4 g8f6 c2c4"] = "e7e6",
@@ -209,7 +224,7 @@ function OpponentProfile:Reset()
 end
 
 --------------------------------------------------------------------------------
--- 4. INTERNAL AI CHESS ENGINE (RENAMED KEYS SO GC SCAN NEVER MATCHES US!)
+-- 4. INTERNAL AI CHESS ENGINE
 --------------------------------------------------------------------------------
 local AIEngine = {}
 AIEngine.__index = AIEngine
@@ -682,15 +697,15 @@ end
 function AIEngine:SelectBestMove(mySide)
     self.ActiveSide = mySide
     local legalMoves = self:GetLegalMoves(mySide, false)
-    if #legalMoves == 0 then return nil, 0, "No Legal Moves", 1 end
-    if #legalMoves == 1 then return legalMoves[1], 0, "Forced Move", 1 end
+    if #legalMoves == 0 then return nil, 0, "No Legal Moves" end
+    if #legalMoves == 1 then return legalMoves[1], 0, "Forced Move" end
 
     local historyKey = table.concat(self.MoveHistoryUCI, " ")
     local bookUCI = OpeningBook[historyKey]
     if bookUCI then
-        for idx, m in ipairs(legalMoves) do
+        for _, m in ipairs(legalMoves) do
             if m.uci == bookUCI then
-                return m, 999, "GM Book (" .. bookUCI .. ")", idx
+                return m, 999, "GM Book (" .. bookUCI .. ")"
             end
         end
     end
@@ -714,18 +729,16 @@ function AIEngine:SelectBestMove(mySide)
     end
 
     local bestMove = legalMoves[1]
-    local bestIdx = 1
     local bestAvg = -999999
-    for idx, m in ipairs(legalMoves) do
+    for _, m in ipairs(legalMoves) do
         local avg = (voteScores[m.uci] or -99999) / Config.SimulationsPerMove
         if avg > bestAvg then
             bestAvg = avg
             bestMove = m
-            bestIdx = idx
         end
     end
 
-    return bestMove, math.floor(bestAvg), string.format("Sim x%d D%d", Config.SimulationsPerMove, targetDepth), bestIdx
+    return bestMove, math.floor(bestAvg), string.format("Sim x%d D%d", Config.SimulationsPerMove, targetDepth)
 end
 
 function AIEngine:ParseSANMove(san, side)
@@ -778,20 +791,19 @@ function AIEngine:ParseSANMove(san, side)
 end
 
 --------------------------------------------------------------------------------
--- 5. DEEP GC & PACKET HOOK ENGINE v5 (CAPTURES #2 CONTROLLER, #3 RAM BOARD, & "xb3")
+-- 5. CONTROLLER #2 (`playMove` / `makeMove` / `selectedSq`) & RAM BOARD #3 HOOKS
 --------------------------------------------------------------------------------
 local HookState = {
     NetQueue = {},
-    HexRemote = nil,
-    ControllerTable2 = nil,    -- Table containing #2 makeMove (Proto:false)
-    ControllerMakeMove2 = nil, -- #2 makeMove function
-    ControllerSiblings = {},   -- All functions inside #2's table or upvalues
-    PacketSenderFns = {},      -- Functions in GC with constants "xb3" / ("b1" & "ply")
-    RAMBoards3 = {},           -- Live #3 board objects ({board, side, ply, castling, ep, kingSq, fullmove})
-    BoardPrototype3 = nil,     -- Metatable #3 containing board methods
-    SpoofMouseActive = false,
-    SpoofX = 0,
-    SpoofY = 0,
+    Controller2 = nil,        -- RoChess Client Controller Table (#2)
+    OrigPlayMove = nil,       -- Controller2.playMove
+    OrigMakeMove = nil,       -- Controller2.makeMove
+    PlayMoveParams = 2,
+    MakeMoveParams = 3,
+    BoundRAMBoard = nil,      -- The exact RAMBoard bound to Controller2's upvalues
+    AllRAMBoards = {},
+    SquareClickFns = {},      -- Any GC function referencing "selectedSq"
+    LockedMethodName = nil,   -- Automatically locked once a method increments ply!
     LastHookSummary = "Ready"
 }
 
@@ -806,11 +818,14 @@ local function SerializeVal(v, depth)
         return v.ClassName .. ":" .. v.Name
     elseif type(v) == "table" then
         if rawget(v, "_IsOurAIEngine") then return "OurAIEngine" end
+        if rawget(v, "board") and rawget(v, "kingSq") then
+            return string.format("RAMBoard(ply=%s,side=%s)", tostring(rawget(v, "ply")), tostring(rawget(v, "side")))
+        end
         local parts = {}
         local c = 0
         for k, val in pairs(v) do
             c += 1
-            if c <= 8 then
+            if c <= 6 then
                 parts[#parts + 1] = tostring(k) .. "=" .. SerializeVal(val, depth + 1)
             end
         end
@@ -819,15 +834,12 @@ local function SerializeVal(v, depth)
     return tostring(v)
 end
 
--- Safe Non-Blocking __namecall Hook (Spoofs GetMouseLocation during Square Hook + Logs Net Packets)
+-- Safe passive __namecall packet logger (NEVER alters or blocks game calls)
 if hookmetamethod and getnamecallmethod then
     pcall(function()
         local oldNamecall
         local hookFn = function(self, ...)
             local method = getnamecallmethod()
-            if HookState.SpoofMouseActive and self == UserInputService and method == "GetMouseLocation" then
-                return Vector2.new(HookState.SpoofX, HookState.SpoofY)
-            end
             if (method == "FireServer" or method == "InvokeServer") and not checkcaller() then
                 HookState.NetQueue[#HookState.NetQueue + 1] = {
                     rem = self,
@@ -838,7 +850,7 @@ if hookmetamethod and getnamecallmethod then
             return oldNamecall(self, ...)
         end
         oldNamecall = hookmetamethod(game, "__namecall", newcclosure and newcclosure(hookFn) or hookFn)
-        Logger.Push("INIT", "Safe __namecall v5 active (MouseLocation Spoof + Packet Sniffer).")
+        Logger.Push("INIT", "Passive __namecall sniffer ready (0% touch interference).")
     end)
 end
 
@@ -846,10 +858,8 @@ local function ProcessNetQueue()
     while #HookState.NetQueue > 0 do
         local item = table.remove(HookState.NetQueue, 1)
         pcall(function()
-            local rem = item.rem
-            local remName = tostring(rem.Name)
+            local remName = tostring(item.rem.Name)
             local args = item.args
-
             local dumped = {}
             for i = 1, math.min(#args, 4) do
                 dumped[#dumped + 1] = SerializeVal(args[i], 0)
@@ -859,99 +869,139 @@ local function ProcessNetQueue()
     end
 end
 
--- Scans GC for:
---   1) #2 makeMove (Proto:false, Consts:[type, number, string, char, tostring, q, r, b, n]) & its table/upvalues
---   2) #3 RAM Board Instances ({board, side, ply, castling, ep, kingSq, fullmove})
---   3) Packet Sender functions containing constants "xb3" or ("b1" and "ply")
-local function DeepScanRoChessMemory()
-    table.clear(HookState.RAMBoards3)
-    table.clear(HookState.PacketSenderFns)
-    table.clear(HookState.ControllerSiblings)
+-- Inspects a function's param count, constants, and upvalues into short log lines
+local function InspectAndLogFunction(tag, fn)
+    if type(fn) ~= "function" then return end
+    local numParams = "?"
+    if debug and debug.getinfo then
+        local ok, info = pcall(debug.getinfo, fn)
+        if ok and info then
+            numParams = tostring(info.numparams) .. (info.is_vararg ~= 0 and "+" or "")
+        end
+    end
 
-    for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
-        if desc:IsA("RemoteEvent") or desc:IsA("RemoteFunction") then
-            if string.match(desc.Name, "^[0-9a-fA-F]+$") and #desc.Name >= 6 then
-                HookState.HexRemote = HookState.HexRemote or desc
+    local constsList = {}
+    if debug and debug.getconstants then
+        local ok, consts = pcall(debug.getconstants, fn)
+        if ok and consts then
+            for _, c in pairs(consts) do
+                if type(c) == "string" and #c > 0 and #c <= 22 then
+                    constsList[#constsList + 1] = c
+                end
             end
         end
     end
 
+    local upvalsList = {}
+    if debug and debug.getupvalues then
+        local ok, uvs = pcall(debug.getupvalues, fn)
+        if ok and uvs then
+            for k, uv in pairs(uvs) do
+                if type(uv) == "table" and rawget(uv, "board") and rawget(uv, "kingSq") then
+                    HookState.BoundRAMBoard = uv
+                    upvalsList[#upvalsList + 1] = "uv" .. tostring(k) .. "=RAMBoard(ply=" .. tostring(uv.ply) .. ")"
+                else
+                    upvalsList[#upvalsList + 1] = "uv" .. tostring(k) .. ":" .. type(uv)
+                end
+            end
+        end
+    end
+
+    Logger.Push(tag, string.format("Params:%s Consts:[%s] UVs:[%s]",
+        numParams,
+        table.concat(constsList, ","),
+        table.concat(upvalsList, ",")
+    ))
+end
+
+local function ScanRoChessMemoryV6()
     if not getgc then
-        Logger.Push("WARN", "Executor missing getgc()!")
+        Logger.Push("WARN", "Executor does not support getgc()!")
         return
     end
+
+    table.clear(HookState.AllRAMBoards)
+    table.clear(HookState.SquareClickFns)
+    HookState.BoundRAMBoard = nil
 
     pcall(function()
         for _, obj in ipairs(getgc(true)) do
             if type(obj) == "table" and not rawget(obj, "_IsOurAIEngine") and obj ~= HookState and obj ~= Logger then
-                -- Check if this is a live #3 RAM Board Instance!
+                -- 1. Check for RAMBoard #3 ({board, side, ply, kingSq})
                 local brd = rawget(obj, "board")
-                local side = rawget(obj, "side")
                 local ply = rawget(obj, "ply")
                 local kingSq = rawget(obj, "kingSq")
-                if type(brd) == "table" and side ~= nil and type(ply) == "number" and kingSq ~= nil then
-                    table.insert(HookState.RAMBoards3, obj)
-                    local mt = getmetatable(obj)
-                    if type(mt) == "table" then
-                        HookState.BoardPrototype3 = rawget(mt, "__index") or mt
-                    end
+                if type(brd) == "table" and type(ply) == "number" and kingSq ~= nil then
+                    table.insert(HookState.AllRAMBoards, obj)
                 end
 
-                -- Check if this table has `makeMove`
+                -- 2. Check for Controller #2 (has both `playMove` and `makeMove` or `inLiveGame`)
+                local pm = rawget(obj, "playMove")
                 local mm = rawget(obj, "makeMove")
-                if type(mm) == "function" then
-                    local isProto = (rawget(obj, "__index") == obj)
-                    if not isProto then
-                        -- This is Table #2 (Proto:false Controller/Module)!
-                        HookState.ControllerTable2 = obj
-                        HookState.ControllerMakeMove2 = mm
+                local ilg = rawget(obj, "inLiveGame")
+                if type(pm) == "function" and type(mm) == "function" then
+                    HookState.Controller2 = obj
+                    HookState.OrigPlayMove = rawget(obj, "_OrigPlayMove") or pm
+                    HookState.OrigMakeMove = rawget(obj, "_OrigMakeMove") or mm
 
-                        local keyNames = {}
-                        for k, v in pairs(obj) do
-                            keyNames[#keyNames + 1] = tostring(k) .. "(" .. type(v) .. ")"
-                            if type(v) == "function" then
-                                HookState.ControllerSiblings[tostring(k)] = v
+                    -- Dump all keys of Controller #2 in short 6-key chunks so nothing is cut off!
+                    local chunk = {}
+                    local chunkIdx = 1
+                    for k, v in pairs(obj) do
+                        if tostring(k) ~= "_OrigPlayMove" and tostring(k) ~= "_OrigMakeMove" then
+                            chunk[#chunk + 1] = tostring(k) .. ":" .. string.sub(type(v), 1, 3)
+                            if #chunk >= 6 then
+                                Logger.Push("C2-KEYS#" .. chunkIdx, table.concat(chunk, " | "))
+                                table.clear(chunk)
+                                chunkIdx += 1
                             end
                         end
-                        Logger.Push("TBL2", "Controller #2 Keys: [" .. table.concat(keyNames, ", ") .. "]")
+                    end
+                    if #chunk > 0 then
+                        Logger.Push("C2-KEYS#" .. chunkIdx, table.concat(chunk, " | "))
+                    end
 
-                        -- Inspect #2 makeMove parameter info & upvalues
-                        if debug and debug.getinfo then
-                            local okI, info = pcall(debug.getinfo, mm)
-                            if okI and info then
-                                Logger.Push("MM2-INFO", string.format("numparams=%s vararg=%s", tostring(info.numparams), tostring(info.is_vararg)))
-                            end
-                        end
-                        if debug and debug.getupvalues then
-                            local okU, uvs = pcall(debug.getupvalues, mm)
+                    -- Inspect both playMove and makeMove
+                    InspectAndLogFunction("PM-INFO", HookState.OrigPlayMove)
+                    InspectAndLogFunction("MM-INFO", HookState.OrigMakeMove)
+
+                    -- Also check if any field or upvalue of Controller #2 holds the active RAMBoard
+                    for k, v in pairs(obj) do
+                        if type(v) == "table" and rawget(v, "board") and rawget(v, "kingSq") then
+                            HookState.BoundRAMBoard = v
+                            Logger.Push("C2-BRD", "Found RAMBoard in Controller2." .. tostring(k))
+                        elseif type(v) == "function" and debug and debug.getupvalues then
+                            local okU, uvs = pcall(debug.getupvalues, v)
                             if okU and uvs then
-                                local uvDesc = {}
-                                for uk, uv in pairs(uvs) do
-                                    uvDesc[#uvDesc + 1] = tostring(uk) .. "=" .. SerializeVal(uv, 0)
-                                    if type(uv) == "function" then
-                                        HookState.ControllerSiblings["uv_" .. tostring(uk)] = uv
-                                    elseif type(uv) == "table" and rawget(uv, "board") and rawget(uv, "ply") then
-                                        table.insert(HookState.RAMBoards3, uv)
+                                for _, uv in pairs(uvs) do
+                                    if type(uv) == "table" and rawget(uv, "board") and rawget(uv, "kingSq") then
+                                        HookState.BoundRAMBoard = uv
                                     end
                                 end
-                                Logger.Push("MM2-UV", "Upvals: " .. table.concat(uvDesc, " | "))
                             end
                         end
+                    end
 
-                        -- Install transparent spy wrapper on Table2.makeMove to log exact arguments when manual move occurs!
-                        if not rawget(obj, "_SpyInstalled") then
-                            rawset(obj, "_SpyInstalled", true)
-                            local origMM2 = mm
-                            rawset(obj, "makeMove", function(...)
-                                local a = { ... }
-                                local d = {}
-                                for i = 1, #a do d[#d + 1] = SerializeVal(a[i], 0) end
-                                Logger.Push("SPY-MM2", "makeMove called with (" .. table.concat(d, ", ") .. ")")
-                                return origMM2(...)
-                            end)
-                        end
-                    else
-                        HookState.BoardPrototype3 = obj
+                    -- Install transparent, zero-side-effect spies on playMove and makeMove
+                    if not rawget(obj, "_OrigPlayMove") then
+                        rawset(obj, "_OrigPlayMove", pm)
+                        rawset(obj, "playMove", function(...)
+                            local args = { ... }
+                            local d = {}
+                            for i = 1, #args do d[#d + 1] = SerializeVal(args[i], 0) end
+                            Logger.Push("SPY-PM", "playMove(" .. table.concat(d, ", ") .. ")")
+                            return pm(...)
+                        end)
+                    end
+                    if not rawget(obj, "_OrigMakeMove") then
+                        rawset(obj, "_OrigMakeMove", mm)
+                        rawset(obj, "makeMove", function(...)
+                            local args = { ... }
+                            local d = {}
+                            for i = 1, #args do d[#d + 1] = SerializeVal(args[i], 0) end
+                            Logger.Push("SPY-MM", "makeMove(" .. table.concat(d, ", ") .. ")")
+                            return mm(...)
+                        end)
                     end
                 end
 
@@ -959,36 +1009,17 @@ local function DeepScanRoChessMemory()
                 if debug and debug.getconstants then
                     local okC, consts = pcall(debug.getconstants, obj)
                     if okC and consts then
-                        local hasXb3, hasB1, hasPly, hasTs = false, false, false, false
+                        local hasSelectedSq = false
                         local cList = {}
                         for _, c in pairs(consts) do
                             if type(c) == "string" then
-                                if c == "xb3" then hasXb3 = true
-                                elseif c == "b1" then hasB1 = true
-                                elseif c == "ply" then hasPly = true
-                                elseif c == "ts" then hasTs = true
-                                end
-                                if #c > 0 and #c <= 20 then
-                                    cList[#cList + 1] = c
-                                end
+                                if c == "selectedSq" then hasSelectedSq = true end
+                                if #c > 0 and #c <= 20 then cList[#cList + 1] = c end
                             end
                         end
-                        if hasXb3 or (hasB1 and hasPly) or (hasB1 and hasTs) then
-                            table.insert(HookState.PacketSenderFns, obj)
-                            Logger.Push("PKT-FN", "Found Move Sender Fn! Consts:[" .. table.concat(cList, ", ") .. "]")
-                            if debug.getupvalues then
-                                local okU, uvs = pcall(debug.getupvalues, obj)
-                                if okU and uvs then
-                                    local uvDump = {}
-                                    for uk, uv in pairs(uvs) do
-                                        uvDump[#uvDump + 1] = tostring(uk) .. "=" .. SerializeVal(uv, 0)
-                                        if type(uv) == "table" and rawget(uv, "board") and rawget(uv, "ply") then
-                                            table.insert(HookState.RAMBoards3, uv)
-                                        end
-                                    end
-                                    Logger.Push("PKT-UV", "Sender Upvals: " .. table.concat(uvDump, " | "))
-                                end
-                            end
+                        if hasSelectedSq then
+                            table.insert(HookState.SquareClickFns, obj)
+                            Logger.Push("SQ-FN", "Fn with 'selectedSq'! Consts:[" .. table.concat(cList, ",") .. "]")
                         end
                     end
                 end
@@ -996,33 +1027,48 @@ local function DeepScanRoChessMemory()
         end
     end)
 
-    -- Log methods on BoardPrototype3 (#3) if discovered
-    if HookState.BoardPrototype3 then
-        local protoMethods = {}
-        for k, v in pairs(HookState.BoardPrototype3) do
-            if type(v) == "function" then
-                protoMethods[#protoMethods + 1] = tostring(k)
-            end
-        end
-        Logger.Push("PROTO3", "Methods: [" .. table.concat(protoMethods, ", ") .. "]")
-    end
-
-    Logger.Push("SCAN", string.format("Tbl2:%s | RAMBoards:%d | PktFns:%d",
-        HookState.ControllerMakeMove2 and "FOUND" or "None",
-        #HookState.RAMBoards3,
-        #HookState.PacketSenderFns
+    Logger.Push("SCAN", string.format("C2:%s | BoundRAM:%s | AllRAM:%d | SqFns:%d",
+        HookState.Controller2 and "OK" or "nil",
+        HookState.BoundRAMBoard and ("ply=" .. tostring(HookState.BoundRAMBoard.ply)) or "nil",
+        #HookState.AllRAMBoards,
+        #HookState.SquareClickFns
     ))
 end
 
 --------------------------------------------------------------------------------
--- 6. EXACT TURN DETECTOR (CLOCK TEXTCOLOR3 + RAM BOARD) & BOARD STATE SYNC
+-- 6. TRUE VISIBILITY HELPER & EXACT LIVE MATCH / TURN / COLOR DETECTOR
 --------------------------------------------------------------------------------
 local OurScreenGui = nil
 
+-- Checks if `guiObj` AND all its ancestors up to PlayerGui are actually visible!
+-- Fixes the video_1.mp4 bug where hidden lobby labels ("Searching for opponent...") kept .Visible == true!
+local function IsTrulyVisible(guiObj)
+    if not guiObj or not guiObj:IsA("GuiObject") then return false end
+    local cur = guiObj
+    while cur and cur ~= PlayerGui do
+        if cur:IsA("GuiObject") and not cur.Visible then
+            return false
+        elseif cur:IsA("LayerCollector") and not cur.Enabled then
+            return false
+        end
+        cur = cur.Parent
+    end
+    return cur == PlayerGui
+end
+
 local function GetBoardFrame()
+    -- Priority 1: Use Controller #2.bgFrame if available and truly visible!
+    if HookState.Controller2 then
+        local bg = rawget(HookState.Controller2, "bgFrame")
+        if typeof(bg) == "Instance" and bg:IsA("GuiObject") and IsTrulyVisible(bg) and bg.AbsoluteSize.X >= 200 then
+            return bg
+        end
+    end
+
+    -- Priority 2: Scan truly visible square frames
     local candidates = {}
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
-        if desc:IsA("GuiObject") and desc.Visible and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
+        if desc:IsA("GuiObject") and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) and IsTrulyVisible(desc) then
             local sz = desc.AbsoluteSize
             if sz.X >= 220 and sz.Y >= 220 and math.abs(sz.X - sz.Y) <= 18 then
                 local n = string.lower(desc.Name)
@@ -1042,101 +1088,124 @@ local function GetBoardFrame()
     return candidates[1] and candidates[1].frame or nil
 end
 
--- Picks the live #3 RAM Board instance that represents the active match
 local function GetActiveRAMBoard()
-    local bestInst = nil
-    local bestPly = -1
-    for _, inst in ipairs(HookState.RAMBoards3) do
-        if type(inst) == "table" and type(rawget(inst, "board")) == "table" and type(rawget(inst, "ply")) == "number" then
-            if inst.ply >= bestPly then
-                bestPly = inst.ply
-                bestInst = inst
+    if HookState.BoundRAMBoard and type(rawget(HookState.BoundRAMBoard, "board")) == "table" then
+        return HookState.BoundRAMBoard
+    end
+    -- Fallback: check if any upvalue of SquareClickFns holds a RAMBoard
+    if debug and debug.getupvalues then
+        for _, fn in ipairs(HookState.SquareClickFns) do
+            local ok, uvs = pcall(debug.getupvalues, fn)
+            if ok and uvs then
+                for _, uv in pairs(uvs) do
+                    if type(uv) == "table" and rawget(uv, "board") and rawget(uv, "kingSq") then
+                        HookState.BoundRAMBoard = uv
+                        return uv
+                    end
+                end
             end
         end
     end
-    return bestInst
+    return HookState.AllRAMBoards[1]
 end
 
--- 100% Exact Turn Detection from video_1.mp4:
--- In RoChess!, whoever's turn it is has their Clock Pill turn white and their Clock TextColor3 turn BLACK (R < 0.45)!
--- When waiting, Clock TextColor3 is WHITE (R > 0.65)!
+local ClockHistory = {
+    TopText = "",
+    BottomText = "",
+    LastChangedSide = nil
+}
+
+-- Determines if we are in a live match and whose turn it is (100% immune to hidden Lobby labels!)
 local function DetectMatchAndTurnState(boardFrame)
+    -- 1. Check Controller2.inLiveGame() first!
+    if HookState.Controller2 and type(rawget(HookState.Controller2, "inLiveGame")) == "function" then
+        local ok, inGame = pcall(rawget(HookState.Controller2, "inLiveGame"))
+        if ok and inGame == false then
+            return "NOT_IN_LIVE_GAME"
+        end
+    end
+
     if not boardFrame then return "NO_BOARD" end
     local boardCenterY = boardFrame.AbsolutePosition.Y + (boardFrame.AbsoluteSize.Y * 0.5)
     local boardTopY = boardFrame.AbsolutePosition.Y
-    local boardBottomY = boardFrame.AbsolutePosition.Y + boardFrame.AbsoluteSize.Y
 
     local topClockLbl, bottomClockLbl = nil, nil
     local explicitBadgeTurn = nil
+    local hasDrawOrResignOrAbort = false
 
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
-        if desc:IsA("TextLabel") and desc.Visible and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
-            local rawTxt = desc.Text
-            local t = string.lower(rawTxt)
+        if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
+            if IsTrulyVisible(desc) then
+                local rawTxt = desc.Text
+                local t = string.lower(rawTxt)
 
-            if
-                string.find(t, "find a match") or
-                string.find(t, "searching for opponent") or
-                string.find(t, "loading...") or
-                t == "game aborted" or
-                string.find(t, "play again") or
-                string.find(t, "you won") or
-                string.find(t, "you lost")
-            then
-                if desc.AbsolutePosition.Y < boardBottomY + 180 then
-                    return "LOBBY_OR_ENDED"
+                if t == "draw" or t == "resign" or string.find(t, "abort") then
+                    hasDrawOrResignOrAbort = true
                 end
-            end
 
-            if string.find(t, "to move") then
-                explicitBadgeTurn = (desc.AbsolutePosition.Y > boardCenterY) and "MY_TURN" or "OPPONENT_TURN"
-            end
+                if string.find(t, "to move") then
+                    explicitBadgeTurn = (desc.AbsolutePosition.Y > boardCenterY) and "MY_TURN" or "OPPONENT_TURN"
+                end
 
-            local trimmed = string.gsub(rawTxt, "%s+", "")
-            if string.match(trimmed, "^%d+:%d%d$") then
-                if desc.AbsolutePosition.Y < boardTopY then
-                    topClockLbl = desc
-                elseif desc.AbsolutePosition.Y > boardCenterY then
-                    bottomClockLbl = desc
+                local trimmed = string.gsub(rawTxt, "%s+", "")
+                if string.match(trimmed, "^%d+:%d%d$") then
+                    if desc.AbsolutePosition.Y < boardTopY then
+                        topClockLbl = desc
+                    elseif desc.AbsolutePosition.Y > boardCenterY then
+                        bottomClockLbl = desc
+                    end
                 end
             end
         end
     end
 
     if not topClockLbl or not bottomClockLbl then
-        return "LOBBY_NO_CLOCKS"
+        return "WAITING_FOR_MATCH"
     end
 
     if explicitBadgeTurn then
         return explicitBadgeTurn
     end
 
-    -- Check TextColor3 of Bottom Clock vs Top Clock (Black text R < 0.45 = Active Turn Pill!)
-    local botColor = bottomClockLbl.TextColor3
-    local topColor = topClockLbl.TextColor3
-    local botLum = (botColor.R + botColor.G + botColor.B) / 3
-    local topLum = (topColor.R + topColor.G + topColor.B) / 3
+    -- Compare TextColor3 luminance of Bottom Clock vs Top Clock:
+    -- In video_1.mp4: Active clock pill has dark text (R,G,B ~ 0.1) on white background; inactive has white text (R,G,B ~ 0.9)!
+    local botCol = bottomClockLbl.TextColor3
+    local topCol = topClockLbl.TextColor3
+    local botLum = (botCol.R + botCol.G + botCol.B) / 3
+    local topLum = (topCol.R + topCol.G + topCol.B) / 3
 
-    if botLum < 0.48 and topLum > 0.55 then
+    if botLum < 0.48 and topLum > 0.52 then
         return "MY_TURN"
-    elseif topLum < 0.48 and botLum > 0.55 then
+    elseif topLum < 0.48 and botLum > 0.52 then
         return "OPPONENT_TURN"
     end
 
-    return "ACTIVE_UNKNOWN_TURN"
+    -- Fallback: Track which clock string ("2:59", "2:58") ticked most recently
+    if bottomClockLbl.Text ~= ClockHistory.BottomText then
+        ClockHistory.BottomText = bottomClockLbl.Text
+        ClockHistory.LastChangedSide = "MY_TURN"
+    end
+    if topClockLbl.Text ~= ClockHistory.TopText then
+        ClockHistory.TopText = topClockLbl.Text
+        ClockHistory.LastChangedSide = "OPPONENT_TURN"
+    end
+
+    if ClockHistory.LastChangedSide then
+        return ClockHistory.LastChangedSide
+    end
+
+    return hasDrawOrResignOrAbort and "LIVE_TURN_BY_PLY" or "WAITING_FOR_MATCH"
 end
 
--- Scroll-Proof Move List Scraper:
--- Finds the move history container below the board and reads ALL move tokens even if scrolled above boardBottomY!
+-- Scrapes move tokens ("e4", "d5", etc.) if the Game history tab is visible
 local function ScrapeAllMovesScrollProof(boardFrame)
     if not boardFrame then return {} end
     local boardBottomY = boardFrame.AbsolutePosition.Y + boardFrame.AbsoluteSize.Y - 12
     local rawTokens = {}
 
     for _, desc in ipairs(PlayerGui:GetDescendants()) do
-        if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and desc.Visible then
-            if not OurScreenGui or not desc:IsDescendantOf(OurScreenGui) then
-                -- Check if the label itself OR its ancestor ScrollingFrame is located in the bottom panel
+        if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and (not OurScreenGui or not desc:IsDescendantOf(OurScreenGui)) then
+            if IsTrulyVisible(desc) then
                 local scrollAncestor = desc:FindFirstAncestorWhichIsA("ScrollingFrame")
                 local isBottomPanel = false
                 local sortY = desc.AbsolutePosition.Y
@@ -1191,19 +1260,17 @@ local function ScrapeAllMovesScrollProof(boardFrame)
     return result
 end
 
--- Synchronizes AIEngine directly from RoChess's live #3 RAM Board if available!
+-- Synchronizes AIEngine directly from RoChess's live #3 RAMBoard (works even when [Players] tab hides move list!)
 local PieceCharMap = {
     P = 1, N = 2, B = 3, R = 4, Q = 5, K = 6,
     p = -1, n = -2, b = -3, r = -4, q = -5, k = -6
 }
 
-local function TrySyncFromRAMBoard(aiEngine, ramBoard)
+local function SyncEngineFromRAMBoard(aiEngine, ramBoard)
     if not ramBoard or type(ramBoard.board) ~= "table" then return false end
     local rb = ramBoard.board
-
-    -- Detect how `rb` stores pieces (1..64 array)
     local converted = table.create(64, 0)
-    local nonZeroCount = 0
+    local nonZero = 0
 
     for sq = 1, 64 do
         local v = rb[sq] or rb[sq - 1]
@@ -1212,10 +1279,8 @@ local function TrySyncFromRAMBoard(aiEngine, ramBoard)
             if v >= -6 and v <= 6 then
                 mapped = v
             elseif v >= 1 and v <= 12 then
-                -- 1..6 White (P,N,B,R,Q,K), 7..12 Black OR bit-encoded piece
-                if v <= 6 then mapped = v else mapped = -(v - 6) end
+                mapped = (v <= 6) and v or -(v - 6)
             elseif v >= 9 and v <= 22 then
-                -- Piece = bit32.band(v, 7), Color = bit32.band(v, 8) or 16
                 local pType = bit32.band(v, 7)
                 local isBlack = (bit32.band(v, 16) ~= 0) or (v >= 17)
                 mapped = isBlack and -pType or pType
@@ -1223,13 +1288,13 @@ local function TrySyncFromRAMBoard(aiEngine, ramBoard)
         elseif type(v) == "string" and PieceCharMap[v] then
             mapped = PieceCharMap[v]
         end
-        if mapped ~= 0 then nonZeroCount += 1 end
+        if mapped ~= 0 then nonZero += 1 end
         converted[sq] = mapped
     end
 
-    if nonZeroCount < 2 then return false end
+    if nonZero < 2 then return false end
 
-    -- Check orientation (if Rank 1 has negative pieces and Rank 8 has positive pieces, flip rank order)
+    -- Check orientation using kingSq or rank sums so Rank 1 is always White's home rank
     local rank1Sum, rank8Sum = 0, 0
     for f = 1, 8 do
         rank1Sum += converted[f]
@@ -1249,262 +1314,130 @@ local function TrySyncFromRAMBoard(aiEngine, ramBoard)
         aiEngine.Squares64[i] = converted[i]
     end
 
-    -- Determine side to move from `ramBoard.ply` (even ply = White (1), odd ply = Black (-1))
     if type(ramBoard.ply) == "number" then
         aiEngine.ActiveSide = (ramBoard.ply % 2 == 0) and 1 or -1
     end
-
     return true
 end
 
 --------------------------------------------------------------------------------
--- 7. MULTI-ENGINE PURE HOOK DISPATCHER v5
+-- 7. SAFE VERIFIED MOVE DISPATCHER v6 (CONTROLLER #2 + PLY VERIFICATION)
 --------------------------------------------------------------------------------
-local function ComputeSquareScreenCenter(boardFrame, sqIdx, mySide)
-    local file, rank = IndexToFileRank(sqIdx)
-    local col, row
-    if mySide == 1 then
-        col = file - 1; row = 8 - rank
-    else
-        col = 8 - file; row = rank - 1
-    end
-    local bPos = boardFrame.AbsolutePosition
-    local bSize = boardFrame.AbsoluteSize
-    local cellW, cellH = bSize.X / 8, bSize.Y / 8
-    return math.floor(bPos.X + (col + 0.5) * cellW), math.floor(bPos.Y + (row + 0.5) * cellH)
-end
-
--- Finds all interactive objects inside the Board hierarchy (INCLUDING the 100% Full-Board Hitbox!)
--- while strictly excluding Modals, Toasts, Overlays, and OurScreenGui!
-local function GetBoardInteractiveTargetsAt(boardFrame, x, y)
-    local targets = {}
-    local seen = {}
-
-    local function AddIfValid(obj)
-        if not obj or seen[obj] or not obj:IsA("GuiObject") or not obj.Visible then return end
-        if OurScreenGui and obj:IsDescendantOf(OurScreenGui) then return end
-        local n = string.lower(obj.Name)
-        if string.find(n, "modal") or string.find(n, "toast") or string.find(n, "overlay") or string.find(n, "topbar") then
-            return
-        end
-        local pos = obj.AbsolutePosition
-        local sz = obj.AbsoluteSize
-        if x >= pos.X and x <= (pos.X + sz.X) and y >= pos.Y and y <= (pos.Y + sz.Y) then
-            seen[obj] = true
-            table.insert(targets, obj)
-        end
-    end
-
-    for _, desc in ipairs(boardFrame:GetDescendants()) do
-        AddIfValid(desc)
-    end
-    AddIfValid(boardFrame)
-    if boardFrame.Parent and boardFrame.Parent:IsA("GuiObject") then
-        AddIfValid(boardFrame.Parent)
-    end
-
-    table.sort(targets, function(a, b)
-        return a.ZIndex > b.ZIndex
-    end)
-
-    return targets
-end
-
--- Fires complete Click-to-Move AND Drag-and-Drop Input Lifecycle on Board Hitbox & UserInputService
-local function FireBoardInputLifecycle(boardFrame, fx, fy, tx, ty, fromAlg, toAlg)
-    if not getconnections then return 0 end
-    local targetsSrc = GetBoardInteractiveTargetsAt(boardFrame, fx, fy)
-    local targetsDst = GetBoardInteractiveTargetsAt(boardFrame, tx, ty)
-
-    local inset = GuiService:GetGuiInset()
-    local totalFired = 0
-    local firedNames = {}
-
-    local function MakeFakeInput(x, y, state, uType)
-        return {
-            UserInputType = uType,
-            UserInputState = state,
-            Position = Vector3.new(x, y, 0),
-            Delta = Vector3.zero,
-            KeyCode = Enum.KeyCode.Unknown
-        }
-    end
-
-    local function TriggerStep(targets, x, y, isPress, isRelease)
-        HookState.SpoofMouseActive = true
-        HookState.SpoofX = x
-        HookState.SpoofY = y + inset.Y
-
-        for _, obj in ipairs(targets) do
-            -- 1. GuiButton signals
-            if isPress and obj:IsA("GuiButton") then
-                for _, sigName in ipairs({ "Activated", "MouseButton1Down", "MouseButton1Click" }) do
-                    local ok, conns = pcall(getconnections, obj[sigName])
-                    if ok and conns and #conns > 0 then
-                        for _, c in ipairs(conns) do
-                            if c.Function then
-                                pcall(task.spawn, c.Function, x, y)
-                                pcall(task.spawn, c.Function)
-                                totalFired += 1
-                            end
-                        end
-                        firedNames[#firedNames + 1] = obj.Name .. "." .. sigName
-                        break
-                    end
-                end
-            end
-
-            -- 2. InputBegan
-            if isPress then
-                local okB, connsB = pcall(getconnections, obj.InputBegan)
-                if okB and connsB and #connsB > 0 then
-                    local inMouse = MakeFakeInput(x, y, Enum.UserInputState.Begin, Enum.UserInputType.MouseButton1)
-                    local inTouch = MakeFakeInput(x, y, Enum.UserInputState.Begin, Enum.UserInputType.Touch)
-                    for _, c in ipairs(connsB) do
-                        if c.Function then
-                            pcall(task.spawn, c.Function, inMouse, false)
-                            pcall(task.spawn, c.Function, inTouch, false)
-                            totalFired += 1
-                        end
-                    end
-                    firedNames[#firedNames + 1] = obj.Name .. ".InBegan"
-                end
-            end
-
-            -- 3. InputEnded (Essential to complete tap or drop dragged piece!)
-            if isRelease then
-                local okE, connsE = pcall(getconnections, obj.InputEnded)
-                if okE and connsE and #connsE > 0 then
-                    local outMouse = MakeFakeInput(x, y, Enum.UserInputState.End, Enum.UserInputType.MouseButton1)
-                    local outTouch = MakeFakeInput(x, y, Enum.UserInputState.End, Enum.UserInputType.Touch)
-                    for _, c in ipairs(connsE) do
-                        if c.Function then
-                            pcall(task.spawn, c.Function, outMouse, false)
-                            pcall(task.spawn, c.Function, outTouch, false)
-                            totalFired += 1
-                        end
-                    end
-                    firedNames[#firedNames + 1] = obj.Name .. ".InEnded"
-                end
-            end
-        end
-
-        -- 4. Also check UserInputService global InputBegan / InputEnded connections
-        if isPress then
-            local okU, uConns = pcall(getconnections, UserInputService.InputBegan)
-            if okU and uConns then
-                local inTouch = MakeFakeInput(x, y, Enum.UserInputState.Begin, Enum.UserInputType.Touch)
-                for _, c in ipairs(uConns) do
-                    if c.Function and (not isexecutorclosure or not isexecutorclosure(c.Function)) then
-                        pcall(task.spawn, c.Function, inTouch, false)
-                        totalFired += 1
-                    end
-                end
-            end
-        end
-        if isRelease then
-            local okU, uConns = pcall(getconnections, UserInputService.InputEnded)
-            if okU and uConns then
-                local outTouch = MakeFakeInput(x, y, Enum.UserInputState.End, Enum.UserInputType.Touch)
-                for _, c in ipairs(uConns) do
-                    if c.Function and (not isexecutorclosure or not isexecutorclosure(c.Function)) then
-                        pcall(task.spawn, c.Function, outTouch, false)
-                        totalFired += 1
-                    end
-                end
-            end
-        end
-    end
-
-    -- Step A: Press & Release on Source Square (`fromAlg`)
-    TriggerStep(targetsSrc, fx, fy, true, true)
-    task.wait(Config.SelectionHookDelay)
-
-    -- Step B: Re-scan Destination Square (`toAlg`) and Press & Release
-    targetsDst = GetBoardInteractiveTargetsAt(boardFrame, tx, ty)
-    TriggerStep(targetsDst, tx, ty, true, true)
-
-    HookState.SpoofMouseActive = false
-
-    Logger.Push("SQ-V5", string.format("%s->%s Fired:%d [%s]",
-        fromAlg, toAlg, totalFired, table.concat(firedNames, ", ")
-    ))
-    return totalFired
-end
-
-local function DispatchMovev5(move, mySide, legalMoveIdx)
+local function DispatchMoveV6(move)
     local fromAlg = IndexToAlgebraic(move.from)
     local toAlg = IndexToAlgebraic(move.to)
     local uci = fromAlg .. toAlg
     local promoStr = move.promo and "q" or nil
-    local summary = {}
 
-    -- Engine 1: Invoke #2 makeMove (Proto:false Controller/Module) directly with candidate signatures!
-    if HookState.ControllerMakeMove2 then
-        local fn2 = HookState.ControllerMakeMove2
-        local tbl2 = HookState.ControllerTable2
-        local activeRAM = GetActiveRAMBoard()
+    local ramBoard = GetActiveRAMBoard()
+    local plyBefore = (ramBoard and type(ramBoard.ply) == "number") and ramBoard.ply or -1
 
-        -- Try calling #2 makeMove with both (fromAlg, toAlg, promo) and (uci) and (ramBoard, fromAlg, toAlg)
-        pcall(function() fn2(fromAlg, toAlg, promoStr) end)
-        pcall(function() fn2(uci) end)
-        if tbl2 then
-            pcall(function() fn2(tbl2, fromAlg, toAlg, promoStr) end)
+    local function DidMoveSucceed()
+        if ramBoard and type(ramBoard.ply) == "number" and plyBefore >= 0 then
+            return ramBoard.ply > plyBefore
         end
-        if activeRAM then
-            pcall(function() fn2(activeRAM, fromAlg, toAlg, promoStr) end)
-            pcall(function() fn2(activeRAM, uci) end)
-        end
-        summary[#summary + 1] = "MM2:" .. uci
+        return false
     end
 
-    -- Engine 2: Check if any sibling function in ControllerTable2 handles square selection / move submission
-    for k, fn in pairs(HookState.ControllerSiblings) do
-        local kl = string.lower(k)
-        if string.find(kl, "move") or string.find(kl, "play") or string.find(kl, "submit") then
-            pcall(function() fn(fromAlg, toAlg, promoStr) end)
-            pcall(function() fn(uci) end)
-        elseif string.find(kl, "select") or string.find(kl, "click") or string.find(kl, "square") then
-            pcall(function()
-                fn(fromAlg)
-                task.wait(0.05)
-                fn(toAlg)
-            end)
-            pcall(function()
-                fn(move.from)
-                task.wait(0.05)
-                fn(move.to)
-            end)
-            summary[#summary + 1] = "Sib:" .. k
+    local c2 = HookState.Controller2
+    local pm = HookState.OrigPlayMove or (c2 and rawget(c2, "playMove"))
+    local mm = HookState.OrigMakeMove or (c2 and rawget(c2, "makeMove"))
+
+    if not c2 or (not pm and not mm) then
+        Logger.Push("WARN", "Controller #2 not bound yet! Running scan...")
+        ScanRoChessMemoryV6()
+        c2 = HookState.Controller2
+        pm = HookState.OrigPlayMove
+        mm = HookState.OrigMakeMove
+    end
+
+    -- Candidate Execution Strategies (All using clean strings/numbers - NEVER passing tables as squares!)
+    local strategies = {
+        {
+            name = "C2.makeMove(fromAlg,toAlg,promo)",
+            run = function()
+                if mm then mm(fromAlg, toAlg, promoStr) end
+            end
+        },
+        {
+            name = "C2.playMove(fromAlg,toAlg,promo)",
+            run = function()
+                if pm then pm(fromAlg, toAlg, promoStr) end
+            end
+        },
+        {
+            name = "C2.selectedSq+playMove(toAlg)",
+            run = function()
+                if c2 and pm then
+                    rawset(c2, "selectedSq", fromAlg)
+                    pm(toAlg, promoStr)
+                end
+            end
+        },
+        {
+            name = "C2.makeMove(fromIdx,toIdx,promo)",
+            run = function()
+                if mm then mm(move.from, move.to, promoStr) end
+            end
+        },
+        {
+            name = "C2.playMove(fromIdx,toIdx,promo)",
+            run = function()
+                if pm then pm(move.from, move.to, promoStr) end
+            end
+        }
+    }
+
+    -- If a strategy already succeeded on a previous turn, run ONLY that locked strategy first!
+    if HookState.LockedMethodName then
+        for _, st in ipairs(strategies) do
+            if st.name == HookState.LockedMethodName then
+                local ok, err = pcall(st.run)
+                task.wait(0.08)
+                if ok and DidMoveSucceed() then
+                    HookState.LastHookSummary = "LOCKED:" .. st.name
+                    Logger.Push("EXEC-OK", st.name .. " -> " .. uci)
+                    return true
+                end
+            end
         end
     end
 
-    -- Engine 3: Full-Board Hitbox + UserInputService InputBegan/InputEnded Lifecycle Hook
-    local boardFrame = GetBoardFrame()
-    if boardFrame then
-        local fx, fy = ComputeSquareScreenCenter(boardFrame, move.from, mySide)
-        local tx, ty = ComputeSquareScreenCenter(boardFrame, move.to, mySide)
-        local fired = FireBoardInputLifecycle(boardFrame, fx, fy, tx, ty, fromAlg, toAlg)
-        summary[#summary + 1] = string.format("InHook(%d)", fired)
+    -- Otherwise test each clean strategy sequentially and stop the instant `ramBoard.ply` increments!
+    for _, st in ipairs(strategies) do
+        local ok, err = pcall(st.run)
+        if not ok then
+            Logger.Push("STRAT-ERR", st.name .. ": " .. tostring(err))
+        end
+        task.wait(0.08)
+        if DidMoveSucceed() then
+            HookState.LockedMethodName = st.name
+            HookState.LastHookSummary = "LOCKED:" .. st.name
+            Logger.Push("LOCK-OK", "Verified & Locked " .. st.name .. " on move " .. uci .. "!")
+            return true
+        end
     end
 
-    HookState.LastHookSummary = table.concat(summary, " + ")
+    HookState.LastHookSummary = "Tried 5 C2 Strategies (" .. uci .. ")"
+    Logger.Push("EXEC-TRY", "Tried C2 strategies for " .. uci .. " (ply=" .. tostring(plyBefore) .. ")")
+    return false
 end
 
 --------------------------------------------------------------------------------
--- 8. COMPACT HUD & AUTO-SCROLLING DEBUG LOG UI
+-- 8. COMPACT HUD & TOP-FIRST REAL-TIME DEBUG LOG UI
 --------------------------------------------------------------------------------
 local Engine = AIEngine.new()
 
 OurScreenGui = Instance.new("ScreenGui")
-OurScreenGui.Name = "RoChess_PureHook_v5_HUD"
+OurScreenGui.Name = "RoChess_PureHook_v6_HUD"
 OurScreenGui.ResetOnSpawn = false
+OurScreenGui.DisplayOrder = 999999 -- Always above RoChess layers so buttons NEVER fail to click!
 OurScreenGui.IgnoreGuiInset = false
 OurScreenGui.Parent = (gethui and gethui()) or PlayerGui
 
 local MainFrame = Instance.new("Frame")
 MainFrame.Size = UDim2.new(0, 315, 0, 140)
-MainFrame.Position = UDim2.new(0.02, 0, 0.47, 0)
+MainFrame.Position = UDim2.new(0.02, 0, 0.46, 0)
 MainFrame.BackgroundColor3 = Color3.fromRGB(14, 17, 24)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
@@ -1513,8 +1446,8 @@ MainFrame.Parent = OurScreenGui
 Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
 
 local MainStroke = Instance.new("UIStroke", MainFrame)
-MainStroke.Color = Color3.fromRGB(55, 165, 255)
-MainStroke.Thickness = 1.3
+MainStroke.Color = Color3.fromRGB(55, 195, 145)
+MainStroke.Thickness = 1.4
 
 local TitleLabel = Instance.new("TextLabel")
 TitleLabel.Size = UDim2.new(1, -16, 0, 20)
@@ -1522,9 +1455,9 @@ TitleLabel.Position = UDim2.new(0, 8, 0, 4)
 TitleLabel.BackgroundTransparency = 1
 TitleLabel.Font = Enum.Font.GothamBold
 TitleLabel.TextSize = 12
-TitleLabel.TextColor3 = Color3.fromRGB(110, 215, 255)
+TitleLabel.TextColor3 = Color3.fromRGB(95, 235, 175)
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
-TitleLabel.Text = "RoChess! Pure Hook AI v5 [RAM+MM2]"
+TitleLabel.Text = "RoChess! Pure Hook AI v6 [C2-DIRECT]"
 TitleLabel.Parent = MainFrame
 
 local StatusLabel = Instance.new("TextLabel")
@@ -1537,7 +1470,7 @@ StatusLabel.TextColor3 = Color3.fromRGB(225, 232, 245)
 StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 StatusLabel.TextYAlignment = Enum.TextYAlignment.Top
 StatusLabel.TextWrapped = true
-StatusLabel.Text = "Scanning RoChess #2 Controller & #3 RAM Board..."
+StatusLabel.Text = "Initializing v6 Engine..."
 StatusLabel.Parent = MainFrame
 
 local BtnAuto = Instance.new("TextButton")
@@ -1573,10 +1506,10 @@ BtnLogToggle.Text = "Log: ON"
 BtnLogToggle.Parent = MainFrame
 Instance.new("UICorner", BtnLogToggle).CornerRadius = UDim.new(0, 5)
 
--- Debug Log Window
+-- Top-First Real-Time Debug Log Window
 local LogFrame = Instance.new("Frame")
-LogFrame.Size = UDim2.new(0, 340, 0, 190)
-LogFrame.Position = UDim2.new(0.02, 0, 0.68, 0)
+LogFrame.Size = UDim2.new(0, 340, 0, 195)
+LogFrame.Position = UDim2.new(0.02, 0, 0.67, 0)
 LogFrame.BackgroundColor3 = Color3.fromRGB(10, 12, 18)
 LogFrame.BorderSizePixel = 0
 LogFrame.Active = true
@@ -1597,7 +1530,7 @@ LogHeader.Font = Enum.Font.GothamBold
 LogHeader.TextSize = 10
 LogHeader.TextColor3 = Color3.fromRGB(255, 195, 80)
 LogHeader.TextXAlignment = Enum.TextXAlignment.Left
-LogHeader.Text = "LIVE DEBUG LOG v5 (Auto-scrolls to newest entry)"
+LogHeader.Text = "LIVE LOG v6 (Newest at TOP) | Tick: 0"
 LogHeader.Parent = LogFrame
 
 local LogScroll = Instance.new("ScrollingFrame")
@@ -1605,20 +1538,18 @@ LogScroll.Size = UDim2.new(1, -12, 1, -50)
 LogScroll.Position = UDim2.new(0, 6, 0, 22)
 LogScroll.BackgroundColor3 = Color3.fromRGB(16, 19, 27)
 LogScroll.BorderSizePixel = 0
-LogScroll.ScrollBarThickness = 5
-LogScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-LogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+LogScroll.ScrollBarThickness = 6
+LogScroll.CanvasSize = UDim2.new(0, 0, 0, 400)
 LogScroll.Parent = LogFrame
 Instance.new("UICorner", LogScroll).CornerRadius = UDim.new(0, 5)
 
 local LogTextLabel = Instance.new("TextLabel")
-LogTextLabel.Size = UDim2.new(1, -8, 0, 0)
+LogTextLabel.Size = UDim2.new(1, -10, 0, 400)
 LogTextLabel.Position = UDim2.new(0, 4, 0, 4)
-LogTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 LogTextLabel.BackgroundTransparency = 1
 LogTextLabel.Font = Enum.Font.Code
 LogTextLabel.TextSize = 10
-LogTextLabel.TextColor3 = Color3.fromRGB(210, 235, 215)
+LogTextLabel.TextColor3 = Color3.fromRGB(210, 240, 215)
 LogTextLabel.TextXAlignment = Enum.TextXAlignment.Left
 LogTextLabel.TextYAlignment = Enum.TextYAlignment.Top
 LogTextLabel.TextWrapped = true
@@ -1636,29 +1567,43 @@ local function CreateLogBtn(text, posScaleX, color, callback)
     b.Text = text
     b.Parent = LogFrame
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
-    b.MouseButton1Click:Connect(callback)
+    b.MouseButton1Click:Connect(function()
+        b.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        task.delay(0.12, function()
+            if b and b.Parent then b.BackgroundColor3 = color end
+        end)
+        callback()
+    end)
 end
 
 CreateLogBtn("SCAN RAM", 0.00, Color3.fromRGB(50, 95, 165), function()
-    task.spawn(DeepScanRoChessMemory)
+    Logger.Push("CMD", "Running ScanRoChessMemoryV6...")
+    task.spawn(ScanRoChessMemoryV6)
 end)
 
 CreateLogBtn("STEP 1 MV", 0.25, Color3.fromRGB(40, 135, 95), function()
     task.spawn(function()
-        local bf = GetBoardFrame()
+        local ramBoard = GetActiveRAMBoard()
+        if ramBoard then
+            SyncEngineFromRAMBoard(Engine, ramBoard)
+        end
         local mySide = Engine.ActiveSide
-        local bestMove, score, meta, idx = Engine:SelectBestMove(mySide)
+        local bestMove, score, meta = Engine:SelectBestMove(mySide)
         if bestMove then
             Logger.Push("STEP", string.format("Manual Step %s (%+d) [%s]", bestMove.uci, score, meta))
-            DispatchMovev5(bestMove, mySide, idx)
+            DispatchMoveV6(bestMove)
+        else
+            Logger.Push("STEP", "No legal move found for side " .. tostring(mySide))
         end
     end)
 end)
 
 CreateLogBtn("COPY LOG", 0.50, Color3.fromRGB(125, 75, 165), function()
     if setclipboard then
-        setclipboard(Logger.GetText())
-        Logger.Push("SYS", "Copied full log to clipboard!")
+        setclipboard(Logger.GetChronologicalText())
+        Logger.Push("SYS", "Copied chronological log to clipboard!")
+    else
+        Logger.Push("WARN", "setclipboard not available.")
     end
 end)
 
@@ -1684,30 +1629,39 @@ BtnLogToggle.MouseButton1Click:Connect(function()
     LogFrame.Visible = Logger.Visible
     BtnLogToggle.Text = Logger.Visible and "Log: ON" or "Log: OFF"
     BtnLogToggle.BackgroundColor3 = Logger.Visible and Color3.fromRGB(180, 115, 30) or Color3.fromRGB(70, 75, 90)
-    if Logger.Visible then
-        LogTextLabel.Text = Logger.GetText()
-        task.defer(function()
-            LogScroll.CanvasPosition = Vector2.new(0, 999999)
-        end)
-    end
+    Logger.Dirty = true
 end)
 
 --------------------------------------------------------------------------------
--- 9. MAIN ASYNC LOOP (AUTO-DISCOVERS RAM BOARD + SYNCS + PLAYS FULL MATCH)
+-- 9. MAIN REAL-TIME FLUSHER & AUTO-PLAY LOOP
 --------------------------------------------------------------------------------
 local Running = true
-_G.RoChessV5Cleanup = function()
+_G.RoChessV6Cleanup = function()
     Running = false
+    -- Restore original Controller #2 functions cleanly if re-executed
+    if HookState.Controller2 then
+        if rawget(HookState.Controller2, "_OrigPlayMove") then
+            rawset(HookState.Controller2, "playMove", rawget(HookState.Controller2, "_OrigPlayMove"))
+            rawset(HookState.Controller2, "_OrigPlayMove", nil)
+        end
+        if rawget(HookState.Controller2, "_OrigMakeMove") then
+            rawset(HookState.Controller2, "makeMove", rawget(HookState.Controller2, "_OrigMakeMove"))
+            rawset(HookState.Controller2, "_OrigMakeMove", nil)
+        end
+    end
     if OurScreenGui and OurScreenGui.Parent then
         OurScreenGui:Destroy()
     end
 end
 
-task.spawn(DeepScanRoChessMemory)
+task.spawn(ScanRoChessMemoryV6)
 
+-- Dedicated Real-Time Log UI Updater (Newest Line Always at Top!)
 task.spawn(function()
     while Running and task.wait(0.12) do
+        Logger.TickCount += 1
         ProcessNetQueue()
+
         if #Logger.PendingQueue > 0 then
             while #Logger.PendingQueue > 0 do
                 local entry = table.remove(Logger.PendingQueue, 1)
@@ -1718,13 +1672,16 @@ task.spawn(function()
             end
             Logger.Dirty = true
         end
-        if Logger.Dirty then
-            Logger.Dirty = false
-            LogTextLabel.Text = Logger.GetText()
-            if LogFrame.Visible then
-                task.defer(function()
-                    LogScroll.CanvasPosition = Vector2.new(0, 999999)
-                end)
+
+        if LogFrame.Visible then
+            LogHeader.Text = string.format("LIVE LOG v6 (Newest at TOP) | Tick:%d | Lines:%d", Logger.TickCount, #Logger.Lines)
+            if Logger.Dirty then
+                Logger.Dirty = false
+                local pixelH = math.max(160, #Logger.Lines * 18 + 20)
+                LogScroll.CanvasSize = UDim2.new(0, 0, 0, pixelH)
+                LogTextLabel.Size = UDim2.new(1, -10, 0, pixelH)
+                LogTextLabel.Text = Logger.GetTopFirstText()
+                LogScroll.CanvasPosition = Vector2.new(0, 0) -- Always show Line 1 (Newest!) at the top
             end
         end
     end
@@ -1739,29 +1696,30 @@ local IsExecuting = false
 task.spawn(function()
     while Running and task.wait(0.22) do
         local boardFrame = GetBoardFrame()
-        if boardFrame and not IsExecuting then
+        if not IsExecuting then
             local turnState = DetectMatchAndTurnState(boardFrame)
 
-            if turnState == "LOBBY_OR_ENDED" or turnState == "LOBBY_NO_CLOCKS" then
+            if turnState == "NOT_IN_LIVE_GAME" or turnState == "WAITING_FOR_MATCH" or turnState == "NO_BOARD" then
                 LockedMatchSide = nil
                 LastRAMPly = -1
+                ClockHistory.LastChangedSide = nil
                 StatusLabel.Text = string.format(
-                    "State: %s (Standby)\nTbl2: %s | RAMBoards: %d\nWaiting for match clocks...",
+                    "State: %s\nC2: %s | BoundRAM: %s\nWaiting for live match...",
                     turnState,
-                    HookState.ControllerMakeMove2 and "HOOKED" or "Scanning",
-                    #HookState.RAMBoards3
+                    HookState.Controller2 and "HOOKED" or "Scanning",
+                    HookState.BoundRAMBoard and "YES" or "Scanning"
                 )
             else
-                -- Re-scan GC automatically if match just started and RAMBoards3 is empty
-                if #HookState.RAMBoards3 == 0 or not HookState.ControllerMakeMove2 then
-                    DeepScanRoChessMemory()
+                if not HookState.Controller2 or not GetActiveRAMBoard() then
+                    ScanRoChessMemoryV6()
                 end
 
                 local sanList = ScrapeAllMovesScrollProof(boardFrame)
                 local currentSig = table.concat(sanList, " ")
                 local ramBoard = GetActiveRAMBoard()
-                local ramPly = ramBoard and ramBoard.ply or -1
+                local ramPly = (ramBoard and type(ramBoard.ply) == "number") and ramBoard.ply or -1
 
+                -- Sync Engine whenever either UI move list OR RAMBoard.ply changes!
                 if currentSig ~= LastSyncedSig or (ramPly >= 0 and ramPly ~= LastRAMPly) then
                     Engine:Reset()
                     local applied = 0
@@ -1777,13 +1735,15 @@ task.spawn(function()
                         end
                     end
 
-                    -- If UI move list scrolled/missed moves compared to RAM ply, sync directly from RAMBoard!
+                    -- If UI move list is hidden (e.g. [Players] tab open as in video_1.mp4 at 00:31!), sync directly from RAMBoard!
                     if ramBoard and ramPly > applied then
-                        if TrySyncFromRAMBoard(Engine, ramBoard) then
-                            Logger.Push("RAM-SYNC", string.format("Synced directly from RAM #3 (ply=%d)", ramPly))
+                        if SyncEngineFromRAMBoard(Engine, ramBoard) then
+                            Logger.Push("SYNC-RAM", string.format("Synced board from RAM #3 (ply=%d, side=%s)",
+                                ramPly, Engine.ActiveSide == 1 and "W" or "B"
+                            ))
                         end
                     else
-                        Logger.Push("UI-SYNC", string.format("Synced %d moves (%s) [RAMPly:%d]",
+                        Logger.Push("SYNC-UI", string.format("Synced %d UI moves (%s) [RAMPly:%d]",
                             applied, currentSig ~= "" and currentSig or "Start", ramPly
                         ))
                     end
@@ -1792,7 +1752,6 @@ task.spawn(function()
                     LastRAMPly = ramPly
                 end
 
-                -- Lock our side (White=1, Black=-1) from active turn parity
                 if turnState == "MY_TURN" then
                     LockedMatchSide = LockedMatchSide or Engine.ActiveSide
                 elseif turnState == "OPPONENT_TURN" then
@@ -1802,43 +1761,41 @@ task.spawn(function()
 
                 if turnState ~= LastTurnState then
                     LastTurnState = turnState
-                    Logger.Push("TURN", string.format("State=%s | MySide=%s | EngineTurn=%s",
-                        turnState, mySide == 1 and "WHITE" or "BLACK", Engine.ActiveSide == 1 and "WHITE" or "BLACK"
+                    Logger.Push("TURN", string.format("Turn=%s | MySide=%s | BoardTurn=%s (Ply:%d)",
+                        turnState, mySide == 1 and "WHITE" or "BLACK", Engine.ActiveSide == 1 and "WHITE" or "BLACK", ramPly
                     ))
                 end
 
+                local isMyTurn = (turnState == "MY_TURN") or (turnState == "LIVE_TURN_BY_PLY" and Engine.ActiveSide == mySide)
                 local recentHistory = table.concat(sanList, " ", math.max(1, #sanList - 3), #sanList)
-                local isMyTurn = (turnState == "MY_TURN")
 
-                if Config.AutoPlay and isMyTurn then
+                if Config.AutoPlay and isMyTurn and Engine.ActiveSide == mySide then
                     IsExecuting = true
-                    local bestMove, score, meta, moveIdx = Engine:SelectBestMove(mySide)
+                    local bestMove, score, meta = Engine:SelectBestMove(mySide)
                     if bestMove then
                         StatusLabel.Text = string.format(
-                            "Side: %s | Turn: MY_TURN (Ply:%d)\nHook: %s\nHistory (%d): %s\nBest: %s (%+d) [%s]",
+                            "Side: %s | Turn: MY_TURN (Ply:%d)\nHook: %s\nMoves: %s\nBest: %s (%+d) [%s]",
                             (mySide == 1) and "WHITE" or "BLACK",
                             ramPly,
                             HookState.LastHookSummary,
-                            #Engine.MoveHistoryUCI,
-                            (recentHistory ~= "" and recentHistory or "Start"),
+                            (recentHistory ~= "" and recentHistory or ("RAM Ply " .. tostring(ramPly))),
                             bestMove.uci,
                             score,
                             meta
                         )
-                        Logger.Push("AI", string.format("Playing %s (%+d) [%s]", bestMove.uci, score, meta))
-                        DispatchMovev5(bestMove, mySide, moveIdx)
+                        Logger.Push("AI", string.format("Move %s (%+d) [%s]", bestMove.uci, score, meta))
+                        DispatchMoveV6(bestMove)
                         task.wait(Config.PostMoveCooldown)
                     end
                     IsExecuting = false
                 else
                     StatusLabel.Text = string.format(
-                        "Side: %s | Turn: %s (Ply:%d)\nHook: %s\nHistory (%d): %s\nWaiting for opponent...",
+                        "Side: %s | Turn: %s (Ply:%d)\nHook: %s\nMoves: %s\nWaiting for opponent...",
                         (mySide == 1) and "WHITE" or "BLACK",
                         turnState,
                         ramPly,
                         HookState.LastHookSummary,
-                        #Engine.MoveHistoryUCI,
-                        (recentHistory ~= "" and recentHistory or "Start")
+                        (recentHistory ~= "" and recentHistory or ("RAM Ply " .. tostring(ramPly)))
                     )
                 end
             end
